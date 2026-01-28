@@ -59,6 +59,7 @@ from ..helpers import (
     send,
 )
 from ..subscriptions import SubscriptionManager
+from .cli_monero import monero
 
 
 class NaturalOrderGroup(click.Group):
@@ -1269,3 +1270,6 @@ async def auth(ctx: Context, mint: bool, force: bool, password: bool):
         print(f"Minted {auth_wallet.unit.str(sum_proofs(new_proofs))} auth tokens.")
 
     print(f"Auth balance: {auth_wallet.available_balance}")
+
+# Register Monero commands
+cli.add_command(monero)
