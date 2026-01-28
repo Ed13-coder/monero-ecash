@@ -70,6 +70,14 @@ if settings.mint_backend_bolt11_eur:
         unit=Unit.eur
     )
     backends.setdefault(Method.bolt11, {})[Unit.eur] = backend_bolt11_eur
+if getattr(settings, 'mint_backend_monero_xmr', None):
+    backend_monero_xmr = getattr(wallets_module, settings.mint_backend_monero_xmr)(
+        unit=Unit.pxmr,
+        rpc_url=settings.mint_monero_rpc_url,
+        rpc_username=settings.mint_monero_rpc_username,
+        rpc_password=settings.mint_monero_rpc_password,
+    )
+    backends.setdefault(Method.monero, {})[Unit.pxmr] = backend_monero_xmr
 if not backends:
     raise Exception("No backends are set.")
 

@@ -550,6 +550,8 @@ class Unit(Enum):
     usd = 2
     eur = 3
     btc = 4
+    xmr = 5
+    pxmr = 6  # piconero (atomic unit)
     auth = 999
 
     def str(self, amount: int | float) -> str:
@@ -563,6 +565,10 @@ class Unit(Enum):
             return f"{amount/100:.2f} EUR"
         elif self == Unit.btc:
             return f"{amount/1e8:.8f} BTC"
+        elif self == Unit.xmr:
+            return f"{amount/1e12:.12f} XMR"
+        elif self == Unit.pxmr:
+            return f"{amount} pxmr"
         elif self == Unit.auth:
             return f"{amount} AUTH"
         else:
@@ -701,6 +707,7 @@ class Amount:
 
 class Method(Enum):
     bolt11 = 0
+    monero = 1
 
 
 class WalletKeyset:
