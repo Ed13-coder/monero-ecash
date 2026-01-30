@@ -25,14 +25,21 @@ def validate_monero_address(address: str) -> tuple[bool, str]:
     """
     Validate a Monero address.
 
+    Supports all Monero networks:
+    - Mainnet: primary '4', subaddress '8'
+    - Testnet: primary '9', subaddress 'A'
+    - Stagenet: primary '5', subaddress '7'
+
     Returns:
         Tuple of (is_valid, error_message)
     """
     if not address:
         return False, "Address is empty"
 
-    if address[0] not in ('4', '8'):
-        return False, "Invalid address prefix (must start with 4 or 8)"
+    # Valid prefixes for all network types
+    valid_prefixes = ('4', '8', '9', 'A', '5', '7')
+    if address[0] not in valid_prefixes:
+        return False, f"Invalid address prefix '{address[0]}'"
 
     if len(address) == 95:
         pass  # Standard or subaddress
