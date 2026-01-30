@@ -521,7 +521,7 @@ class LedgerAPI(LedgerAPIDeprecated, SupportsAuth):
             )
             quote_id = f"deprecated_{uuid.uuid4()}"
             amount_sat = (
-                amount_msat // 1000 if amount_msat else invoice_obj.amount_msat // 1000
+                amount_msat // 1000 if amount_msat else (invoice_obj.amount_msat or 0) // 1000
             )
             return PostMeltQuoteResponse(
                 quote=quote_id,
