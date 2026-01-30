@@ -14,6 +14,7 @@ from ..core.base import (
     DLEQWallet,
     MeltQuote,
     MeltQuoteState,
+    Method,
     MintQuote,
     MintQuoteState,
     Proof,
@@ -498,14 +499,14 @@ class Wallet(
         self,
         amount: int,
         memo: Optional[str] = None,
+        method: Method = Method.bolt11,
     ) -> MintQuote:
         """Request a quote invoice for minting tokens.
 
         Args:
-            amount (int): Amount for Lightning invoice in satoshis
-            callback (Optional[Callable], optional): Callback function to be called when the invoice is paid. Defaults to None.
-            memo (Optional[str], optional): Memo for the Lightning invoice. Defaults to None.
-            keypair (Optional[Tuple[str, str], optional]): NUT-19 private public ephemeral keypair. Defaults to None.
+            amount (int): Amount in atomic units
+            memo (Optional[str], optional): Memo for the payment request. Defaults to None.
+            method (Method, optional): Payment method. Defaults to Method.bolt11.
 
         Returns:
             MintQuote: Mint Quote
@@ -514,7 +515,7 @@ class Wallet(
         privkey_hex, pubkey_hex = nut20.generate_keypair()
 
         mint_quote_response = await super().mint_quote(
-            amount, self.unit, memo, pubkey_hex
+            amount, self.unit, memo, pubkey_hex, method=method
         )
         quote = MintQuote.from_resp_wallet(
             mint_quote_response, self.url, amount, self.unit.name
@@ -527,16 +528,18 @@ class Wallet(
     async def get_mint_quote(
         self,
         quote_id: str,
+        method: Method = Method.bolt11,
     ) -> MintQuote:
         """Get a mint quote from mint.
 
         Args:
             quote_id (str): Id of the mint quote.
+            method (Method, optional): Payment method. Defaults to Method.bolt11.
 
         Returns:
             MintQuote: Mint quote.
         """
-        mint_quote_response = await super().get_mint_quote(quote_id)
+        mint_quote_response = await super().get_mint_quote(quote_id, method=method)
         mint_quote_local = await get_bolt11_mint_quote(db=self.db, quote=quote_id)
         mint_quote = MintQuote.from_resp_wallet(
             mint_quote_response,
@@ -565,13 +568,15 @@ class Wallet(
         amount: int,
         quote_id: str,
         split: Optional[List[int]] = None,
+        method: Method = Method.bolt11,
     ) -> List[Proof]:
-        """Mint tokens of a specific amount after an invoice has been paid.
+        """Mint tokens of a specific amount after a payment has been received.
 
         Args:
             amount (int): Total amount of tokens to be minted
-            quote_id (str): Id for looking up the paid Lightning invoice.
+            quote_id (str): Id for looking up the paid payment request.
             split (Optional[List[str]], optional): List of desired amount splits to be minted. Total must sum to `amount`.
+            method (Method, optional): Payment method. Defaults to Method.bolt11.
 
         Raises:
             Exception: Raises exception if `amounts` does not sum to `amount` or has unsupported value.
@@ -613,7 +618,7 @@ class Wallet(
             signature = nut20.sign_mint_quote(quote_id, outputs, quote.privkey)
 
         # will raise exception if mint is unsuccessful
-        promises = await super().mint(outputs, quote_id, signature)
+        promises = await super().mint(outputs, quote_id, signature, method=method)
 
         promises_keyset_id = promises[0].id
         await bump_secret_derivation(
@@ -741,14 +746,25 @@ class Wallet(
         return keep_proofs, send_proofs
 
     async def melt_quote(
-        self, invoice: str, amount_msat: Optional[int] = None
+        self,
+        invoice: str,
+        amount_msat: Optional[int] = None,
+        method: Method = Method.bolt11,
     ) -> MeltQuote:
         """
-        Fetches a melt quote from the mint and either uses the amount in the invoice or the amount provided.
+        Fetches a melt quote from the mint.
+
+        Args:
+            invoice (str): Payment request (bolt11 invoice or monero address/URI)
+            amount_msat (Optional[int], optional): Amount in msat for partial melts (bolt11 only)
+            method (Method, optional): Payment method. Defaults to Method.bolt11.
+
+        Returns:
+            MeltQuote: Melt quote
         """
-        if amount_msat and not self.mint_info.supports_mpp("bolt11", self.unit):
+        if amount_msat and method == Method.bolt11 and not self.mint_info.supports_mpp("bolt11", self.unit):
             raise Exception("Mint does not support MPP, cannot specify amount.")
-        melt_quote_resp = await super().melt_quote(invoice, self.unit, amount_msat)
+        melt_quote_resp = await super().melt_quote(invoice, self.unit, amount_msat, method=method)
         logger.debug(
             f"Mint wants {self.unit.str(melt_quote_resp.fee_reserve)} as fee reserve."
         )
@@ -769,16 +785,19 @@ class Wallet(
         )
         return melt_quote
 
-    async def get_melt_quote(self, quote: str) -> Optional[MeltQuote]:
+    async def get_melt_quote(
+        self, quote: str, method: Method = Method.bolt11
+    ) -> Optional[MeltQuote]:
         """Fetches a melt quote from the mint and updates proofs in the database.
 
         Args:
             quote (str): Quote ID to fetch.
+            method (Method, optional): Payment method. Defaults to Method.bolt11.
 
         Returns:
             Optional[MeltQuote]: MeltQuote object.
         """
-        melt_quote_resp = await super().get_melt_quote(quote)
+        melt_quote_resp = await super().get_melt_quote(quote, method=method)
         melt_quote_local = await get_bolt11_melt_quote(db=self.db, quote=quote)
         melt_quote = MeltQuote.from_resp_wallet(
             melt_quote_resp,
@@ -828,14 +847,21 @@ class Wallet(
         return melt_quote
 
     async def melt(
-        self, proofs: List[Proof], invoice: str, fee_reserve_sat: int, quote_id: str
+        self,
+        proofs: List[Proof],
+        invoice: str,
+        fee_reserve_sat: int,
+        quote_id: str,
+        method: Method = Method.bolt11,
     ) -> PostMeltQuoteResponse:
-        """Pays a lightning invoice and returns the status of the payment.
+        """Pays an invoice and returns the status of the payment.
 
         Args:
             proofs (List[Proof]): List of proofs to be spent.
-            invoice (str): Lightning invoice to be paid.
+            invoice (str): Payment request (bolt11 invoice or monero address/URI).
             fee_reserve_sat (int): Amount of fees to be reserved for the payment.
+            quote_id (str): Quote ID from melt_quote.
+            method (Method, optional): Payment method. Defaults to Method.bolt11.
 
         """
 
@@ -858,7 +884,7 @@ class Wallet(
         await self.set_reserved_for_melt(proofs, reserved=True, quote_id=quote_id)
         proofs = self.sign_proofs_inplace_melt(proofs, change_outputs, quote_id)
         try:
-            melt_quote_resp = await super().melt(quote_id, proofs, change_outputs)
+            melt_quote_resp = await super().melt(quote_id, proofs, change_outputs, method=method)
         except Exception as e:
             logger.debug(f"Mint error: {e}")
             # remove the melt_id in proofs and set reserved to False

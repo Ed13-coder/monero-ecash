@@ -16,6 +16,7 @@ from ..core.base import (
     BlindedMessage,
     BlindedSignature,
     MeltQuoteState,
+    Method,
     Proof,
     ProofSpentState,
     ProofState,
@@ -348,6 +349,7 @@ class LedgerAPI(LedgerAPIDeprecated, SupportsAuth):
         unit: Unit,
         memo: Optional[str] = None,
         pubkey: Optional[str] = None,
+        method: Method = Method.bolt11,
     ) -> PostMintQuoteResponse:
         """Requests a mint quote from the server and returns a payment request.
 
@@ -356,25 +358,27 @@ class LedgerAPI(LedgerAPIDeprecated, SupportsAuth):
             unit (Unit): Unit of the amount
             memo (Optional[str], optional): Memo to attach to Lightning invoice. Defaults to None.
             pubkey (Optional[str], optional): Public key from which to expect a signature in a subsequent mint request.
+            method (Method, optional): Payment method (bolt11 or monero). Defaults to Method.bolt11.
         Returns:
             PostMintQuoteResponse: Mint Quote Response
 
         Raises:
             Exception: If the mint request fails
         """
-        logger.trace("Requesting mint: POST /v1/mint/bolt11")
+        method_name = method.name
+        logger.trace(f"Requesting mint: POST /v1/mint/quote/{method_name}")
         payload = PostMintQuoteRequest(
             unit=unit.name, amount=amount, description=memo, pubkey=pubkey
         )
         resp = await self._request(
             POST,
-            "mint/quote/bolt11",
+            f"mint/quote/{method_name}",
             json=payload.model_dump(),
         )
 
         # BEGIN backwards compatibility < 0.15.0
         # assume the mint has not upgraded yet if we get a 404
-        if resp.status_code == 404:
+        if resp.status_code == 404 and method == Method.bolt11:
             ret = await self.request_mint_deprecated(amount)
             return ret
         # END backwards compatibility < 0.15.0
@@ -384,16 +388,20 @@ class LedgerAPI(LedgerAPIDeprecated, SupportsAuth):
 
     @async_set_httpx_client
     @async_ensure_mint_loaded
-    async def get_mint_quote(self, quote: str) -> PostMintQuoteResponse:
+    async def get_mint_quote(
+        self, quote: str, method: Method = Method.bolt11
+    ) -> PostMintQuoteResponse:
         """Returns an existing mint quote from the server.
 
         Args:
             quote (str): Quote ID
+            method (Method, optional): Payment method. Defaults to Method.bolt11.
 
         Returns:
             PostMintQuoteResponse: Mint Quote Response
         """
-        resp = await self._request(GET, f"mint/quote/bolt11/{quote}")
+        method_name = method.name
+        resp = await self._request(GET, f"mint/quote/{method_name}/{quote}")
         self.raise_on_error_request(resp)
         return_dict = resp.json()
         return PostMintQuoteResponse.model_validate(return_dict)
@@ -401,7 +409,11 @@ class LedgerAPI(LedgerAPIDeprecated, SupportsAuth):
     @async_set_httpx_client
     @async_ensure_mint_loaded
     async def mint(
-        self, outputs: List[BlindedMessage], quote: str, signature: Optional[str] = None
+        self,
+        outputs: List[BlindedMessage],
+        quote: str,
+        signature: Optional[str] = None,
+        method: Method = Method.bolt11,
     ) -> List[BlindedSignature]:
         """Mints new coins and returns a proof of promise.
 
@@ -409,6 +421,7 @@ class LedgerAPI(LedgerAPIDeprecated, SupportsAuth):
             outputs (List[BlindedMessage]): Outputs to mint new tokens with
             quote (str): Quote ID.
             signature (Optional[str], optional): NUT-19 signature of the request.
+            method (Method, optional): Payment method. Defaults to Method.bolt11.
 
         Returns:
             list[Proof]: List of proofs.
@@ -419,7 +432,8 @@ class LedgerAPI(LedgerAPIDeprecated, SupportsAuth):
         outputs_payload = PostMintRequest(
             outputs=outputs, quote=quote, signature=signature
         )
-        logger.trace("Checking Lightning invoice. POST /v1/mint/bolt11")
+        method_name = method.name
+        logger.trace(f"Checking payment. POST /v1/mint/{method_name}")
 
         def _mintrequest_include_fields(outputs: List[BlindedMessage]):
             """strips away fields from the model that aren't necessary for the /mint"""
@@ -435,49 +449,73 @@ class LedgerAPI(LedgerAPIDeprecated, SupportsAuth):
         payload = outputs_payload.model_dump(include=_mintrequest_include_fields(outputs))  # type: ignore
         resp = await self._request(
             POST,
-            "mint/bolt11",
+            f"mint/{method_name}",
             json=payload,  # type: ignore
         )
         # BEGIN backwards compatibility < 0.15.0
         # assume the mint has not upgraded yet if we get a 404
-        if resp.status_code == 404:
+        if resp.status_code == 404 and method == Method.bolt11:
             ret = await self.mint_deprecated(outputs, quote)
             return ret
         # END backwards compatibility < 0.15.0
         self.raise_on_error_request(resp)
         response_dict = resp.json()
-        logger.trace(f"Lightning invoice checked. POST {self.api_prefix}/mint/bolt11")
+        logger.trace(f"Payment checked. POST {self.api_prefix}/mint/{method_name}")
         promises = PostMintResponse.model_validate(response_dict).signatures
         return promises
 
     @async_set_httpx_client
     @async_ensure_mint_loaded
     async def melt_quote(
-        self, payment_request: str, unit: Unit, amount_msat: Optional[int] = None
+        self,
+        payment_request: str,
+        unit: Unit,
+        amount_msat: Optional[int] = None,
+        method: Method = Method.bolt11,
     ) -> PostMeltQuoteResponse:
-        """Checks whether the Lightning payment is internal."""
-        invoice_obj = bolt11.decode(payment_request)
-        assert invoice_obj.amount_msat, "invoice must have amount"
+        """Request a melt quote from the server.
 
-        # add mpp amount for partial melts
-        melt_options = None
-        if amount_msat:
-            melt_options = PostMeltRequestOptions(
-                mpp=PostMeltRequestOptionMpp(amount=amount_msat)
+        Args:
+            payment_request (str): Payment request (bolt11 invoice or monero URI/address)
+            unit (Unit): Unit of the amount
+            amount_msat (Optional[int], optional): Amount in msat for partial melts (bolt11 only)
+            method (Method, optional): Payment method. Defaults to Method.bolt11.
+
+        Returns:
+            PostMeltQuoteResponse: Melt Quote Response
+        """
+        method_name = method.name
+
+        # Method-specific validation
+        if method == Method.bolt11:
+            invoice_obj = bolt11.decode(payment_request)
+            assert invoice_obj.amount_msat, "invoice must have amount"
+
+            # add mpp amount for partial melts
+            melt_options = None
+            if amount_msat:
+                melt_options = PostMeltRequestOptions(
+                    mpp=PostMeltRequestOptionMpp(amount=amount_msat)
+                )
+
+            payload = PostMeltQuoteRequest(
+                unit=unit.name, request=payment_request, options=melt_options
             )
-
-        payload = PostMeltQuoteRequest(
-            unit=unit.name, request=payment_request, options=melt_options
-        )
+        else:
+            # Monero: no bolt11 decoding, no mpp support
+            payload = PostMeltQuoteRequest(
+                unit=unit.name, request=payment_request, options=None
+            )
 
         resp = await self._request(
             POST,
-            "melt/quote/bolt11",
+            f"melt/quote/{method_name}",
             json=payload.model_dump(),
         )
         # BEGIN backwards compatibility < 0.15.0
         # assume the mint has not upgraded yet if we get a 404
-        if resp.status_code == 404:
+        if resp.status_code == 404 and method == Method.bolt11:
+            invoice_obj = bolt11.decode(payment_request)
             ret: CheckFeesResponse_deprecated = await self.check_fees_deprecated(
                 payment_request
             )
@@ -502,16 +540,20 @@ class LedgerAPI(LedgerAPIDeprecated, SupportsAuth):
 
     @async_set_httpx_client
     @async_ensure_mint_loaded
-    async def get_melt_quote(self, quote: str) -> PostMeltQuoteResponse:
+    async def get_melt_quote(
+        self, quote: str, method: Method = Method.bolt11
+    ) -> PostMeltQuoteResponse:
         """Returns an existing melt quote from the server.
 
         Args:
             quote (str): Quote ID
+            method (Method, optional): Payment method. Defaults to Method.bolt11.
 
         Returns:
             PostMeltQuoteResponse: Melt Quote Response
         """
-        resp = await self._request(GET, f"melt/quote/bolt11/{quote}")
+        method_name = method.name
+        resp = await self._request(GET, f"melt/quote/{method_name}/{quote}")
         self.raise_on_error_request(resp)
         return_dict = resp.json()
         return PostMeltQuoteResponse.model_validate(return_dict)
@@ -523,11 +565,21 @@ class LedgerAPI(LedgerAPIDeprecated, SupportsAuth):
         quote: str,
         proofs: List[Proof],
         outputs: Optional[List[BlindedMessage]],
+        method: Method = Method.bolt11,
     ) -> PostMeltQuoteResponse:
         """
-        Accepts proofs and a lightning invoice to pay in exchange.
-        """
+        Accepts proofs and a payment request to pay in exchange.
 
+        Args:
+            quote (str): Quote ID
+            proofs (List[Proof]): Proofs to melt
+            outputs (Optional[List[BlindedMessage]]): Outputs for change
+            method (Method, optional): Payment method. Defaults to Method.bolt11.
+
+        Returns:
+            PostMeltQuoteResponse: Melt response
+        """
+        method_name = method.name
         payload = PostMeltRequest(quote=quote, inputs=proofs, outputs=outputs)
 
         def _meltrequest_include_fields(
@@ -544,7 +596,7 @@ class LedgerAPI(LedgerAPIDeprecated, SupportsAuth):
 
         resp = await self._request(
             POST,
-            "melt/bolt11",
+            f"melt/{method_name}",
             json=payload.model_dump(include=_meltrequest_include_fields(proofs, outputs)),  # type: ignore
             timeout=None,
         )
@@ -555,7 +607,7 @@ class LedgerAPI(LedgerAPIDeprecated, SupportsAuth):
         except Exception as e:
             # BEGIN backwards compatibility < 0.15.0
             # assume the mint has not upgraded yet if we get a 404
-            if resp.status_code == 404:
+            if resp.status_code == 404 and method == Method.bolt11:
                 melt_quote = await get_bolt11_melt_quote(quote=quote, db=self.db)
                 assert melt_quote, f"no melt_quote found for id {quote}"
                 ret: PostMeltResponse_deprecated = await self.melt_deprecated(

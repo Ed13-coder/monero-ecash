@@ -401,3 +401,170 @@ async def restore(payload: PostRestoreRequest) -> PostRestoreResponse:
     assert payload.outputs, Exception("no outputs provided.")
     outputs, signatures = await ledger.restore(payload.outputs)
     return PostRestoreResponse(outputs=outputs, signatures=signatures)
+
+
+# =============================================================================
+# Monero Routes
+# =============================================================================
+
+
+@router.post(
+    "/v1/mint/quote/monero",
+    name="Request Monero mint quote",
+    summary="Request a quote for minting tokens using Monero",
+    response_model=PostMintQuoteResponse,
+    response_description="A Monero address to deposit XMR for minting tokens",
+)
+@limiter.limit(f"{settings.mint_transaction_rate_limit_per_minute}/minute")
+async def mint_quote_monero(
+    request: Request, payload: PostMintQuoteRequest
+) -> PostMintQuoteResponse:
+    """
+    Request minting of new tokens using Monero.
+    The mint responds with a Monero subaddress to deposit to.
+
+    Call `POST /v1/mint/monero` after depositing XMR.
+    """
+    logger.trace(f"> POST /v1/mint/quote/monero: payload={payload}")
+    quote = await ledger.mint_quote(payload, method_str="monero")
+    resp = PostMintQuoteResponse(
+        quote=quote.quote,
+        request=quote.request,
+        amount=quote.amount,
+        unit=quote.unit,
+        paid=quote.paid,
+        state=quote.state.value,
+        expiry=quote.expiry,
+        pubkey=quote.pubkey,
+    )
+    logger.trace(f"< POST /v1/mint/quote/monero: {resp}")
+    return resp
+
+
+@router.get(
+    "/v1/mint/quote/monero/{quote}",
+    summary="Get Monero mint quote",
+    response_model=PostMintQuoteResponse,
+    response_description="Get an existing Monero mint quote to check its status.",
+)
+@limiter.limit(f"{settings.mint_transaction_rate_limit_per_minute}/minute")
+async def get_mint_quote_monero(request: Request, quote: str) -> PostMintQuoteResponse:
+    """
+    Get Monero mint quote state.
+    """
+    logger.trace(f"> GET /v1/mint/quote/monero/{quote}")
+    mint_quote = await ledger.get_mint_quote(quote)
+    resp = PostMintQuoteResponse(
+        quote=mint_quote.quote,
+        request=mint_quote.request,
+        amount=mint_quote.amount,
+        unit=mint_quote.unit,
+        paid=mint_quote.paid,
+        state=mint_quote.state.value,
+        expiry=mint_quote.expiry,
+        pubkey=mint_quote.pubkey,
+    )
+    logger.trace(f"< GET /v1/mint/quote/monero/{quote}")
+    return resp
+
+
+@router.post(
+    "/v1/mint/monero",
+    name="Mint tokens with Monero payment",
+    summary="Mint tokens after depositing XMR.",
+    response_model=PostMintResponse,
+    response_description=(
+        "A list of blinded signatures that can be used to create proofs."
+    ),
+)
+@limiter.limit(f"{settings.mint_transaction_rate_limit_per_minute}/minute")
+@redis.cache()
+async def mint_monero(
+    request: Request,
+    payload: PostMintRequest,
+) -> PostMintResponse:
+    """
+    Requests the minting of tokens after XMR has been deposited.
+
+    Call this endpoint after `POST /v1/mint/quote/monero`.
+    """
+    logger.trace(f"> POST /v1/mint/monero: {payload}")
+
+    promises = await ledger.mint(
+        outputs=payload.outputs, quote_id=payload.quote, signature=payload.signature
+    )
+    blinded_signatures = PostMintResponse(signatures=promises)
+    logger.trace(f"< POST /v1/mint/monero: {blinded_signatures}")
+    return blinded_signatures
+
+
+@router.post(
+    "/v1/melt/quote/monero",
+    summary="Request a Monero melt quote",
+    response_model=PostMeltQuoteResponse,
+    response_description="Melt tokens to receive XMR.",
+)
+@limiter.limit(f"{settings.mint_transaction_rate_limit_per_minute}/minute")
+async def melt_quote_monero(
+    request: Request, payload: PostMeltQuoteRequest
+) -> PostMeltQuoteResponse:
+    """
+    Request a quote for melting tokens to receive Monero.
+    """
+    logger.trace(f"> POST /v1/melt/quote/monero: {payload}")
+    quote = await ledger.melt_quote(payload, method_str="monero")
+    logger.trace(f"< POST /v1/melt/quote/monero: {quote}")
+    return quote
+
+
+@router.get(
+    "/v1/melt/quote/monero/{quote}",
+    summary="Get Monero melt quote",
+    response_model=PostMeltQuoteResponse,
+    response_description="Get an existing Monero melt quote to check its status.",
+)
+@limiter.limit(f"{settings.mint_transaction_rate_limit_per_minute}/minute")
+async def get_melt_quote_monero(request: Request, quote: str) -> PostMeltQuoteResponse:
+    """
+    Get Monero melt quote state.
+    """
+    logger.trace(f"> GET /v1/melt/quote/monero/{quote}")
+    melt_quote = await ledger.get_melt_quote(quote)
+    resp = PostMeltQuoteResponse(
+        quote=melt_quote.quote,
+        amount=melt_quote.amount,
+        unit=melt_quote.unit,
+        request=melt_quote.request,
+        fee_reserve=melt_quote.fee_reserve,
+        paid=melt_quote.paid,
+        state=melt_quote.state.value,
+        expiry=melt_quote.expiry,
+        payment_preimage=melt_quote.payment_preimage,
+        change=melt_quote.change,
+    )
+    logger.trace(f"< GET /v1/melt/quote/monero/{quote}")
+    return resp
+
+
+@router.post(
+    "/v1/melt/monero",
+    name="Melt tokens for Monero",
+    summary="Melt tokens to receive XMR to a Monero address",
+    response_model=PostMeltQuoteResponse,
+    response_description=(
+        "The state of the payment, a tx hash as proof of payment, and a list of"
+        " promises for change."
+    ),
+)
+@limiter.limit(f"{settings.mint_transaction_rate_limit_per_minute}/minute")
+@redis.cache()
+async def melt_monero(request: Request, payload: PostMeltRequest) -> PostMeltQuoteResponse:
+    """
+    Requests tokens to be destroyed and XMR sent to a Monero address.
+    """
+    logger.trace(f"> POST /v1/melt/monero: {payload}")
+    resp = await ledger.melt(
+        proofs=payload.inputs, quote=payload.quote, outputs=payload.outputs
+    )
+    logger.trace(f"< POST /v1/melt/monero: {resp}")
+    return resp
