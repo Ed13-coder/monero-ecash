@@ -25,6 +25,12 @@ import pytest
 MONERO_RPC_URL = os.environ.get("MONERO_RPC_URL", "http://127.0.0.1:18082/json_rpc")
 RUN_INTEGRATION = os.environ.get("RUN_MONERO_INTEGRATION", "false").lower() == "true"
 
+# Skip all integration tests if RUN_MONERO_INTEGRATION is not set
+pytestmark = pytest.mark.skipif(
+    not RUN_INTEGRATION,
+    reason="Monero integration tests disabled. Set RUN_MONERO_INTEGRATION=true to run."
+)
+
 
 def pytest_configure(config):
     config.addinivalue_line(
@@ -150,7 +156,7 @@ async def test_payment_quote(monero_backend, wallet_available):
         assert quote.amount.amount == 1_000_000_000  # 0.001 XMR in piconero
         assert quote.fee.amount > 0  # Should have some fee
 
-        print(f"\nPayment quote:")
+        print("\nPayment quote:")
         print(f"  Amount: {quote.amount.amount / 1e12:.12f} XMR")
         print(f"  Fee: {quote.fee.amount / 1e12:.12f} XMR")
     except Exception as e:
@@ -163,7 +169,7 @@ async def test_payment_quote(monero_backend, wallet_available):
 @pytest.mark.asyncio
 async def test_rpc_connection_error_recovery(monero_backend):
     """Test that backend handles connection errors gracefully."""
-    from cashu.lightning.monero import MoneroBackend, MoneroConnectionError
+    from cashu.lightning.monero import MoneroBackend
 
     # Create backend with wrong URL
     bad_backend = MoneroBackend(

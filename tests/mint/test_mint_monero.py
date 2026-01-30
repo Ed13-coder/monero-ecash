@@ -13,11 +13,9 @@ from cashu.core.base import Amount, MeltQuote, MeltQuoteState, Unit
 from cashu.core.models import PostMeltQuoteRequest
 from cashu.lightning.monero import (
     MoneroBackend,
-    MoneroConnectionError,
     MoneroInsufficientFundsError,
     MoneroInvalidAddressError,
     MoneroRPCError,
-    MoneroTransactionError,
 )
 
 # Test configuration
