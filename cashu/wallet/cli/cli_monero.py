@@ -6,16 +6,13 @@ These commands handle minting and melting ecash using Monero instead of Lightnin
 """
 
 import asyncio
-import sys
 from functools import wraps
-from typing import Optional
 
 import click
 from click import Context
 from loguru import logger
 
 from ...core.base import Method, Unit
-
 
 # Monero address validation
 BASE58_CHARS = set("123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz")

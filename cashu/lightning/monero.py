@@ -7,7 +7,6 @@ enabling ecash tokens backed by Monero instead of Bitcoin Lightning.
 
 import asyncio
 import hashlib
-import re
 from typing import AsyncGenerator, Dict, Optional, Tuple
 
 import httpx
@@ -251,7 +250,7 @@ class MoneroBackend(LightningBackend):
         if self.rpc_username and self.rpc_password:
             auth = httpx.DigestAuth(self.rpc_username, self.rpc_password)
 
-        last_error = None
+        last_error: Optional[MoneroError] = None
         for attempt in range(retries):
             try:
                 async with httpx.AsyncClient() as client:
@@ -279,7 +278,7 @@ class MoneroBackend(LightningBackend):
                         elif code in (-18, -19):  # TX not possible
                             raise MoneroTransactionError(f"Transaction error: {message}")
                         else:
-                            error_desc = MONERO_RPC_ERRORS.get(code, "Unknown error")
+                            error_desc = MONERO_RPC_ERRORS.get(code or 0, "Unknown error")
                             raise MoneroRPCError(f"{error_desc}: {message}", code=code)
 
                     return result.get("result", {})

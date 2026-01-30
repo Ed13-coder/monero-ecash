@@ -70,8 +70,9 @@ if settings.mint_backend_bolt11_eur:
         unit=Unit.eur
     )
     backends.setdefault(Method.bolt11, {})[Unit.eur] = backend_bolt11_eur
-if getattr(settings, 'mint_backend_monero_xmr', None):
-    backend_monero_xmr = getattr(wallets_module, settings.mint_backend_monero_xmr)(
+monero_backend_name = getattr(settings, 'mint_backend_monero_xmr', None)
+if monero_backend_name:
+    backend_monero_xmr = getattr(wallets_module, monero_backend_name)(
         unit=Unit.pxmr,
         rpc_url=settings.mint_monero_rpc_url,
         rpc_username=settings.mint_monero_rpc_username,
