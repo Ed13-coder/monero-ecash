@@ -12,6 +12,8 @@ This project is being developed for [Monero Bounty #136](https://bounties.monero
 - `cashu/lightning/monero.py` - Monero wallet RPC backend
 - `cashu/wallet/cli/cli_monero.py` - Monero-specific CLI commands
 - `tests/mint/test_mint_monero.py` - Unit tests for Monero backend
+- `tests/mint/test_monero_integration.py` - Integration tests (requires wallet RPC)
+- `scripts/test_e2e_monero.py` - End-to-end test script
 
 ### Modified Files
 - `cashu/core/base.py` - Added `Unit.xmr`, `Unit.pxmr` (piconero), and `Method.monero`
@@ -120,6 +122,34 @@ The backend maps Monero RPC error codes to descriptive messages:
 - `-7`: Invalid address
 - `-18/-19`: Transaction not possible
 
+## Testing
+
+### Unit Tests
+Run unit tests (mocked, no wallet needed):
+```bash
+pytest tests/mint/test_mint_monero.py -v
+```
+
+### Integration Tests
+Run integration tests with a real Monero wallet RPC:
+```bash
+# Start Monero wallet RPC first
+monero-wallet-rpc --rpc-bind-port 18082 --wallet-file /path/to/wallet --password pass --disable-rpc-login
+
+# Run integration tests
+RUN_MONERO_INTEGRATION=true pytest tests/mint/test_monero_integration.py -v
+```
+
+### End-to-End Test
+Run the full end-to-end test:
+```bash
+# Start the mint server
+poetry run mint
+
+# In another terminal, run the e2e test
+python scripts/test_e2e_monero.py
+```
+
 ## Status
 
 - [x] Monero backend class
@@ -135,8 +165,9 @@ The backend maps Monero RPC error codes to descriptive messages:
 - [x] Wallet API method parameter support
 - [x] Full wallet integration (request_mint, mint, melt_quote, melt)
 - [x] Unit tests for Monero backend
-- [ ] Integration testing with real Monero wallet RPC
-- [ ] End-to-end testing
+- [x] Integration test suite (tests/mint/test_monero_integration.py)
+- [x] End-to-end test script (scripts/test_e2e_monero.py)
+- [ ] Testing with real Monero wallet RPC (testnet/stagenet)
 
 ## License
 
