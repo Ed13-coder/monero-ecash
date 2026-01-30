@@ -246,20 +246,20 @@ class MoneroBackend(LightningBackend):
             "params": params or {}
         }
 
-        auth = None
-        if self.rpc_username and self.rpc_password:
-            auth = httpx.DigestAuth(self.rpc_username, self.rpc_password)
+        auth = httpx.DigestAuth(self.rpc_username, self.rpc_password) if self.rpc_username and self.rpc_password else None
 
         last_error: Optional[MoneroError] = None
         for attempt in range(retries):
             try:
                 async with httpx.AsyncClient() as client:
-                    response = await client.post(
-                        self.rpc_url,
-                        json=payload,
-                        auth=auth,
-                        timeout=httpx.Timeout(connect=10.0, read=30.0, write=10.0, pool=10.0)
-                    )
+                    request_kwargs = {
+                        "url": self.rpc_url,
+                        "json": payload,
+                        "timeout": httpx.Timeout(connect=10.0, read=30.0, write=10.0, pool=10.0)
+                    }
+                    if auth is not None:
+                        request_kwargs["auth"] = auth
+                    response = await client.post(**request_kwargs)  # type: ignore[arg-type]
                     response.raise_for_status()
                     result = response.json()
 
