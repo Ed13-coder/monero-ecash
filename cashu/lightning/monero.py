@@ -135,15 +135,24 @@ class MoneroBackend(LightningBackend):
         """
         Validate a Monero address format.
 
+        Supports all Monero networks:
+        - Mainnet: primary '4', subaddress '8'
+        - Testnet: primary '9', subaddress 'A'
+        - Stagenet: primary '5', subaddress '7'
+
         Returns:
             Tuple of (is_valid, error_message)
         """
         if not address:
             return False, "Address is empty"
 
-        # Standard address starts with 4, subaddress starts with 8
-        if not address[0] in ('4', '8'):
-            return False, "Invalid address prefix (must start with 4 or 8)"
+        # Valid prefixes for all network types
+        # Mainnet: 4 (standard), 8 (subaddress)
+        # Testnet: 9 (standard), A (subaddress)
+        # Stagenet: 5 (standard), 7 (subaddress)
+        valid_prefixes = ('4', '8', '9', 'A', '5', '7')
+        if address[0] not in valid_prefixes:
+            return False, f"Invalid address prefix '{address[0]}' (expected one of: {', '.join(valid_prefixes)})"
 
         # Standard addresses are 95 chars, integrated addresses are 106 chars
         if len(address) == 95:

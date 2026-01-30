@@ -24,21 +24,28 @@ from cashu.lightning.monero import (
 RPC_URL = "http://127.0.0.1:18082/json_rpc"
 monero = MoneroBackend(unit=Unit.pxmr, rpc_url=RPC_URL)
 
-# Valid Monero addresses for testing (mainnet format)
-VALID_ADDRESS = "4" + "A" * 94  # Standard address (95 chars starting with 4)
-VALID_SUBADDRESS = "8" + "B" * 94  # Subaddress (95 chars starting with 8)
+# Valid Monero addresses for testing
+# Mainnet: primary '4', subaddress '8'
+# Testnet: primary '9', subaddress 'A'
+# Stagenet: primary '5', subaddress '7'
+VALID_ADDRESS = "4" + "A" * 94  # Mainnet standard address
+VALID_SUBADDRESS = "8" + "B" * 94  # Mainnet subaddress
 VALID_INTEGRATED = "4" + "C" * 105  # Integrated address (106 chars)
+VALID_STAGENET_ADDRESS = "5" + "D" * 94  # Stagenet standard address
+VALID_STAGENET_SUBADDRESS = "7" + "E" * 94  # Stagenet subaddress
+VALID_TESTNET_ADDRESS = "9" + "F" * 94  # Testnet standard address
+VALID_TESTNET_SUBADDRESS = "A" + "G" * 94  # Testnet subaddress
 
 
 class TestAddressValidation:
     """Tests for Monero address validation."""
 
-    def test_valid_standard_address(self):
+    def test_valid_mainnet_standard_address(self):
         is_valid, error = MoneroBackend.validate_monero_address(VALID_ADDRESS)
         assert is_valid
         assert error == ""
 
-    def test_valid_subaddress(self):
+    def test_valid_mainnet_subaddress(self):
         is_valid, error = MoneroBackend.validate_monero_address(VALID_SUBADDRESS)
         assert is_valid
         assert error == ""
@@ -48,13 +55,41 @@ class TestAddressValidation:
         assert is_valid
         assert error == ""
 
+    def test_valid_stagenet_address(self):
+        is_valid, error = MoneroBackend.validate_monero_address(VALID_STAGENET_ADDRESS)
+        assert is_valid
+        assert error == ""
+
+    def test_valid_stagenet_subaddress(self):
+        is_valid, error = MoneroBackend.validate_monero_address(VALID_STAGENET_SUBADDRESS)
+        assert is_valid
+        assert error == ""
+
+    def test_valid_testnet_address(self):
+        is_valid, error = MoneroBackend.validate_monero_address(VALID_TESTNET_ADDRESS)
+        assert is_valid
+        assert error == ""
+
+    def test_valid_testnet_subaddress(self):
+        is_valid, error = MoneroBackend.validate_monero_address(VALID_TESTNET_SUBADDRESS)
+        assert is_valid
+        assert error == ""
+
     def test_empty_address(self):
         is_valid, error = MoneroBackend.validate_monero_address("")
         assert not is_valid
         assert "empty" in error.lower()
 
     def test_invalid_prefix(self):
-        invalid = "9" + "A" * 94
+        # '3' is not a valid prefix for any Monero network
+        invalid = "3" + "A" * 94
+        is_valid, error = MoneroBackend.validate_monero_address(invalid)
+        assert not is_valid
+        assert "prefix" in error.lower()
+
+    def test_invalid_prefix_b(self):
+        # 'B' is not a valid prefix (A is testnet subaddress, not B)
+        invalid = "B" + "A" * 94
         is_valid, error = MoneroBackend.validate_monero_address(invalid)
         assert not is_valid
         assert "prefix" in error.lower()
