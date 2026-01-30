@@ -1,4 +1,8 @@
-# Cashu Nutshell
+# Cashu Nutshell (Monero Fork)
+
+> **This is a fork of Cashu Nutshell with Monero support.** See [MONERO_README.md](MONERO_README.md) for Monero-specific documentation.
+>
+> Developed for [Monero Bounty #136](https://bounties.monero.social/posts/136) - Ecash Mint and Wallet for Monero.
 
 **Nutshell is a Chaumian Ecash wallet and mint for Bitcoin Lightning based on the Cashu protocol.**
 
@@ -17,6 +21,7 @@ Cashu is a free and open-source [Ecash protocol](https://github.com/cashubtc/nut
 
 ### Feature overview
 
+- **Monero support** (NEW) - Mint and melt ecash tokens with XMR
 - Bitcoin Lightning support (LND, CLN, et al.)
 - Full support for the Cashu protocol [specifications](https://github.com/cashubtc/nuts)
 - Standalone CLI wallet and mint server
