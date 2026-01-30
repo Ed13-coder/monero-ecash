@@ -21,7 +21,6 @@ Requirements:
 import asyncio
 import os
 import sys
-import time
 
 # Add parent directory to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -112,7 +111,7 @@ async def test_monero_melt_quote():
     # Use a test address (this won't actually send funds without proofs)
     test_address = "4" + "A" * 94
 
-    print(f"\nCreating melt quote...")
+    print("\nCreating melt quote...")
 
     async with httpx.AsyncClient() as client:
         try:
