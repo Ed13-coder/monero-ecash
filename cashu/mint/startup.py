@@ -3,6 +3,7 @@
 
 import asyncio
 import importlib
+import os
 from copy import copy
 from typing import Dict
 
@@ -77,6 +78,8 @@ if monero_backend_name:
         rpc_url=settings.mint_monero_rpc_url,
         rpc_username=settings.mint_monero_rpc_username,
         rpc_password=settings.mint_monero_rpc_password,
+        min_confirmations=settings.mint_monero_min_confirmations,
+        state_file=os.path.join(settings.cashu_dir, "monero_deposits.json"),
     )
     backends.setdefault(Method.monero, {})[Unit.pxmr] = backend_monero_xmr
 if not backends:

@@ -363,6 +363,14 @@ class Ledger(
                 )
             if settings.mint_bolt11_disable_mint:
                 raise NotAllowedError("Minting with bolt11 is disabled.")
+        elif method_str == "monero":
+            if (
+                settings.mint_max_mint_monero
+                and quote_request.amount > settings.mint_max_mint_monero
+            ):
+                raise TransactionAmountExceedsLimitError(
+                    f"Maximum mint amount is {settings.mint_max_mint_monero} pxmr."
+                )
 
         unit, method = self._verify_and_get_unit_method(
             quote_request.unit, method_str
@@ -675,6 +683,14 @@ class Ledger(
             ):
                 raise NotAllowedError(
                     f"Maximum melt amount is {settings.mint_max_melt_bolt11_sat} sat."
+                )
+        elif method == Method.monero:
+            if (
+                settings.mint_max_melt_monero
+                and payment_quote.amount.to(unit).amount > settings.mint_max_melt_monero
+            ):
+                raise NotAllowedError(
+                    f"Maximum melt amount is {settings.mint_max_melt_monero} pxmr."
                 )
 
         # Handle expiry based on method

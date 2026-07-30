@@ -294,6 +294,9 @@ class MoneroFundingSource(MintSettings):
     mint_monero_rpc_url: str = Field(default="http://127.0.0.1:18082/json_rpc")
     mint_monero_rpc_username: Optional[str] = Field(default=None)
     mint_monero_rpc_password: Optional[str] = Field(default=None)
+    mint_monero_min_confirmations: int = Field(default=10)
+    mint_max_mint_monero: Optional[int] = Field(default=None)
+    mint_max_melt_monero: Optional[int] = Field(default=None)
 
 
 class AuthSettings(MintSettings):
