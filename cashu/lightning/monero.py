@@ -2,6 +2,9 @@
 
 import asyncio
 import hashlib
+import json
+import os
+from decimal import Decimal
 from typing import AsyncGenerator, Optional
 
 import httpx
@@ -41,14 +44,26 @@ class MoneroBackend(LightningBackend):
         rpc_url: str = "http://127.0.0.1:18082/json_rpc",
         rpc_username: Optional[str] = None,
         rpc_password: Optional[str] = None,
+        min_confirmations: int = 10,
+        state_file: Optional[str] = None,
+        fee_reserve_fallback: int = 100_000_000,
         **kwargs
     ):
         self.unit = unit
         self.rpc_url = rpc_url
         self.rpc_username = rpc_username
         self.rpc_password = rpc_password
+        # A deposit is only credited once its transaction has at least this
+        # many confirmations. 10 is Monero's default spend-unlock window.
+        self.min_confirmations = min_confirmations
+        # Reserve used only when a live fee estimate can't be built.
+        self.fee_reserve_fallback = fee_reserve_fallback
+        # Deposit-tracking state is persisted here so a mint restart doesn't
+        # strand in-flight deposits (which would lock users out of minting
+        # tokens they've already paid for). None = in-memory only.
+        self.state_file = state_file
 
-        self.pending_deposits: dict[str, dict] = {}
+        self.pending_deposits: dict[str, dict] = self._load_state()
         self.pending_payments: dict[str, dict] = {}
         # Queue for incoming payment notifications
         self.paid_invoices_queue: asyncio.Queue[str] = asyncio.Queue()
@@ -56,6 +71,29 @@ class MoneroBackend(LightningBackend):
         # Polling interval for checking incoming payments (seconds)
         self.poll_interval = 5
         self._polling_task: Optional[asyncio.Task] = None
+
+    def _load_state(self) -> dict:
+        """Load persisted deposit-tracking state from disk (if configured)."""
+        if not self.state_file or not os.path.exists(self.state_file):
+            return {}
+        try:
+            with open(self.state_file) as f:
+                return json.load(f)
+        except (OSError, ValueError):
+            logger.error(f"Could not read Monero deposit state from {self.state_file}")
+            return {}
+
+    def _save_state(self) -> None:
+        """Persist deposit-tracking state to disk via an atomic replace."""
+        if not self.state_file:
+            return
+        try:
+            tmp = f"{self.state_file}.tmp"
+            with open(tmp, "w") as f:
+                json.dump(self.pending_deposits, f)
+            os.replace(tmp, self.state_file)
+        except OSError as e:
+            logger.error(f"Could not persist Monero deposit state: {e}")
 
     @staticmethod
     def validate_monero_address(address: str) -> tuple[bool, str]:
@@ -76,6 +114,24 @@ class MoneroBackend(LightningBackend):
 
         return True, ""
 
+    async def validate_address_rpc(self, address: str) -> bool:
+        """Authoritatively validate an address via the wallet's own validator.
+
+        The static check only covers prefix/length/charset; it cannot verify
+        Monero's base58 keccak checksum, so a typo'd address can pass it. Before
+        sending funds we ask the wallet, which checks the checksum and network.
+        Fails closed on any RPC error.
+        """
+        try:
+            result = await self._rpc_call("validate_address", {
+                "address": address,
+                "any_net_type": False,
+                "allow_openalias": False,
+            })
+            return bool(result.get("valid"))
+        except MoneroRPCError:
+            return False
+
     def _parse_monero_uri(self, uri: str) -> tuple[str, int, Optional[str]]:
         """Parse monero: URI or plain address. Returns (address, amount_pico, description)."""
         address = uri
@@ -89,7 +145,7 @@ class MoneroBackend(LightningBackend):
             if len(parts) > 1:
                 params = dict(p.split("=", 1) for p in parts[1].split("&") if "=" in p)
                 if "tx_amount" in params:
-                    amount = int(float(params["tx_amount"]) * 1e12)
+                    amount = int(Decimal(params["tx_amount"]) * 1_000_000_000_000)
                 description = params.get("tx_description")
 
         is_valid, error = self.validate_monero_address(address)
@@ -170,8 +226,9 @@ class MoneroBackend(LightningBackend):
                 "amount": amount.amount,
                 "paid": False
             }
+            self._save_state()
 
-            amount_xmr = amount.amount / 1e12
+            amount_xmr = Decimal(amount.amount) / Decimal(10**12)
             payment_request = f"monero:{address}?tx_amount={amount_xmr:.12f}"
 
             return InvoiceResponse(ok=True, checking_id=checking_id, payment_request=payment_request)
@@ -188,6 +245,12 @@ class MoneroBackend(LightningBackend):
         amount = quote.amount if quote.amount > 0 else parsed_amount
         if amount <= 0:
             return PaymentResponse(result=PaymentResult.FAILED, error_message="Amount must be positive")
+
+        # Last line of defence before funds leave: the static parse only checked
+        # format. Verify the checksum/network with the wallet itself — sending to
+        # an address that merely "looks" valid would lose the XMR for good.
+        if not await self.validate_address_rpc(address):
+            return PaymentResponse(result=PaymentResult.FAILED, error_message="Invalid Monero address")
 
         try:
             result = await self._rpc_call("transfer", {
@@ -224,21 +287,27 @@ class MoneroBackend(LightningBackend):
             return PaymentStatus(result=PaymentResult.SETTLED, preimage=deposit.get("tx_hash"))
 
         try:
+            # Only confirmed incoming transfers count. A transfer still in the
+            # txpool has zero confirmations and can be dropped before it mines,
+            # so crediting it would let a depositor mint tokens against funds
+            # the mint never actually receives.
             result = await self._rpc_call("get_transfers", {
-                "in": True, "pending": True, "pool": True,
-                "subaddr_indices": [deposit["address_index"]]
+                "in": True,
+                "subaddr_indices": [deposit["address_index"]],
             })
 
-            for ttype in ["in", "pending", "pool"]:
-                for tx in result.get(ttype, []):
-                    if tx.get("amount", 0) >= deposit["amount"]:
-                        deposit["paid"] = True
-                        deposit["tx_hash"] = tx.get("txid")
-                        try:
-                            self.paid_invoices_queue.put_nowait(checking_id)
-                        except asyncio.QueueFull:
-                            pass
-                        return PaymentStatus(result=PaymentResult.SETTLED, preimage=tx.get("txid"))
+            for tx in result.get("in", []):
+                if tx.get("confirmations", 0) < self.min_confirmations:
+                    continue
+                if tx.get("amount", 0) >= deposit["amount"]:
+                    deposit["paid"] = True
+                    deposit["tx_hash"] = tx.get("txid")
+                    self._save_state()
+                    try:
+                        self.paid_invoices_queue.put_nowait(checking_id)
+                    except asyncio.QueueFull:
+                        pass
+                    return PaymentStatus(result=PaymentResult.SETTLED, preimage=tx.get("txid"))
 
             return PaymentStatus(result=PaymentResult.PENDING)
         except MoneroRPCError as e:
@@ -257,16 +326,40 @@ class MoneroBackend(LightningBackend):
         except MoneroRPCError:
             return PaymentStatus(result=PaymentResult.UNKNOWN)
 
+    async def _estimate_fee(self, address: str, amount: int) -> int:
+        """Estimate the fee reserve for a withdrawal.
+
+        Builds the tx without relaying it to read the real network fee — a flat
+        hardcoded reserve loses the mint money whenever the true fee is higher
+        (congestion, many inputs) — then adds 50% headroom since the rate can
+        rise between quote and melt. Unused reserve is returned as change.
+        Falls back to fee_reserve_fallback if the estimate can't be built.
+        """
+        if amount > 0:
+            try:
+                result = await self._rpc_call("transfer", {
+                    "destinations": [{"amount": amount, "address": address}],
+                    "priority": 1,
+                    "do_not_relay": True,
+                    "get_tx_metadata": True,
+                })
+                fee = int(result.get("fee", 0))
+                if fee > 0:
+                    return fee + fee // 2  # +50% headroom
+            except MoneroRPCError:
+                pass
+        return self.fee_reserve_fallback
+
     async def get_payment_quote(self, melt_quote: PostMeltQuoteRequest) -> PaymentQuoteResponse:
-        """Get quote for payment."""
+        """Get quote for payment (with a live fee estimate)."""
         address, amount, _ = self._parse_monero_uri(melt_quote.request)
-        fee = 100000000  # ~0.0001 XMR default
+        fee = await self._estimate_fee(address, amount)
 
         checking_id = hashlib.sha256(melt_quote.request.encode()).hexdigest()
         return PaymentQuoteResponse(
             checking_id=checking_id,
             amount=Amount(self.unit, amount),
-            fee=Amount(self.unit, fee)
+            fee=Amount(self.unit, fee),
         )
 
     async def paid_invoices_stream(self) -> AsyncGenerator[str, None]:

@@ -113,7 +113,7 @@ async def test_monero_create_invoice_failure():
 async def test_monero_pay_invoice():
     respx.post(RPC_URL).mock(return_value=Response(200, json={
         "jsonrpc": "2.0", "id": "0",
-        "result": {"tx_hash": "abc123def456", "fee": 100_000_000}
+        "result": {"valid": True, "tx_hash": "abc123def456", "fee": 100_000_000}
     }))
 
     quote = MeltQuote(
@@ -130,10 +130,10 @@ async def test_monero_pay_invoice():
 @respx.mock
 @pytest.mark.asyncio
 async def test_monero_pay_invoice_insufficient_funds():
-    respx.post(RPC_URL).mock(return_value=Response(200, json={
-        "jsonrpc": "2.0", "id": "0",
-        "error": {"code": -17, "message": "not enough money"}
-    }))
+    respx.post(RPC_URL).mock(side_effect=[
+        Response(200, json={"jsonrpc": "2.0", "id": "0", "result": {"valid": True}}),
+        Response(200, json={"jsonrpc": "2.0", "id": "0", "error": {"code": -17, "message": "not enough money"}}),
+    ])
 
     quote = MeltQuote(
         request=f"monero:{VALID_ADDRESS}",
@@ -186,7 +186,7 @@ async def test_monero_get_invoice_status_paid():
 
     respx.post(RPC_URL).mock(return_value=Response(200, json={
         "jsonrpc": "2.0", "id": "0",
-        "result": {"in": [{"amount": 1_000_000_000_000, "txid": "tx123"}], "pending": [], "pool": []}
+        "result": {"in": [{"amount": 1_000_000_000_000, "txid": "tx123", "confirmations": 10}], "pending": [], "pool": []}
     }))
     status = await monero.get_invoice_status(invoice.checking_id)
     assert status.settled
@@ -194,10 +194,54 @@ async def test_monero_get_invoice_status_paid():
 
 @respx.mock
 @pytest.mark.asyncio
+async def test_monero_get_invoice_status_under_confirmed():
+    # A deposit below min_confirmations must NOT be credited: the tx can still
+    # be dropped, which would let a depositor mint against money that never lands.
+    respx.post(RPC_URL).mock(return_value=Response(200, json={
+        "jsonrpc": "2.0", "id": "0",
+        "result": {"address": VALID_SUBADDRESS, "address_index": 1}
+    }))
+    invoice = await monero.create_invoice(Amount(Unit.pxmr, 1_000_000_000_000))
+
+    respx.post(RPC_URL).mock(return_value=Response(200, json={
+        "jsonrpc": "2.0", "id": "0",
+        "result": {"in": [{"amount": 1_000_000_000_000, "txid": "tx123", "confirmations": 3}]}
+    }))
+    status = await monero.get_invoice_status(invoice.checking_id)
+    assert status.pending
+    assert not status.settled
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_monero_get_invoice_status_pool_not_credited():
+    # A tx still in the txpool (0-conf) must not settle the deposit.
+    respx.post(RPC_URL).mock(return_value=Response(200, json={
+        "jsonrpc": "2.0", "id": "0",
+        "result": {"address": VALID_SUBADDRESS, "address_index": 1}
+    }))
+    invoice = await monero.create_invoice(Amount(Unit.pxmr, 1_000_000_000_000))
+
+    respx.post(RPC_URL).mock(return_value=Response(200, json={
+        "jsonrpc": "2.0", "id": "0",
+        "result": {"in": [], "pool": [{"amount": 1_000_000_000_000, "txid": "txpool"}]}
+    }))
+    status = await monero.get_invoice_status(invoice.checking_id)
+    assert status.pending
+
+
+@respx.mock
+@pytest.mark.asyncio
 async def test_monero_get_payment_quote():
+    # fee is estimated from a do-not-relay dry-run (+50% headroom), not hardcoded
+    respx.post(RPC_URL).mock(return_value=Response(200, json={
+        "jsonrpc": "2.0", "id": "0",
+        "result": {"fee": 120_000_000}
+    }))
     req = PostMeltQuoteRequest(unit=Unit.pxmr.name, request=f"monero:{VALID_ADDRESS}?tx_amount=1.0")
     quote = await monero.get_payment_quote(req)
     assert quote.amount.amount == 1_000_000_000_000
+    assert quote.fee.amount == 180_000_000
 
 
 @respx.mock
