@@ -34,6 +34,13 @@ MINT_BACKEND_MONERO_XMR=MoneroBackend
 MINT_MONERO_RPC_URL=http://127.0.0.1:18082/json_rpc
 MINT_MONERO_RPC_USERNAME=  # Optional
 MINT_MONERO_RPC_PASSWORD=  # Optional
+
+# Confirmations before a deposit is credited
+MINT_MONERO_MIN_CONFIRMATIONS=10
+
+# Optional caps in piconero, leave unset for no limit
+MINT_MAX_MINT_MONERO=
+MINT_MAX_MELT_MONERO=
 ```
 
 ## Requirements
@@ -60,6 +67,32 @@ pip install -r requirements.txt
 1. User submits ecash tokens with a Monero address
 2. Backend verifies and burns the tokens
 3. Backend sends XMR to the user's address
+
+## Confirmations
+
+### Deposits
+
+A deposit needs `MINT_MONERO_MIN_CONFIRMATIONS` (10 by default) before it counts.
+Anything shallower is ignored, including transactions still in the txpool.
+
+Crediting early would let someone mint against a transaction that never lands and
+then replace it, which is the same mistake as treating a 0-conf payment as final.
+
+### Withdrawals
+
+Withdrawals are marked settled when the transaction is broadcast, not when it is
+mined. `get_payment_status` returns SETTLED for any txid in `pending_payments`,
+which `pay_invoice` writes as soon as the transfer goes out.
+
+That is a tradeoff rather than an oversight:
+
+- Waiting for confirmations would add roughly 20 minutes to every withdrawal
+- The risk only runs one way. A dropped transaction means the user burned tokens
+  and did not get their XMR. It cannot be used to drain the mint
+- Monero has no fee bumping, so a stuck withdrawal needs manual handling anyway
+
+To prefer correctness over speed, gate `get_payment_status` on confirmations the
+same way `get_invoice_status` does.
 
 ## API Endpoints
 
