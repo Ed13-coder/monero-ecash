@@ -297,6 +297,12 @@ class MoneroBackend(LightningBackend):
             })
 
             for tx in result.get("in", []):
+                # A confirmed output can still be locked by the transaction's
+                # unlock_time. Do not issue liquid ecash until the wallet says
+                # the backing output is spendable. Treat a missing `locked`
+                # field as locked so an incompatible RPC response fails safe.
+                if tx.get("locked", True):
+                    continue
                 if tx.get("confirmations", 0) < self.min_confirmations:
                     continue
                 if tx.get("amount", 0) >= deposit["amount"]:

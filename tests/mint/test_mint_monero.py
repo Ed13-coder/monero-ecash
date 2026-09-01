@@ -186,7 +186,12 @@ async def test_monero_get_invoice_status_paid():
 
     respx.post(RPC_URL).mock(return_value=Response(200, json={
         "jsonrpc": "2.0", "id": "0",
-        "result": {"in": [{"amount": 1_000_000_000_000, "txid": "tx123", "confirmations": 10}], "pending": [], "pool": []}
+        "result": {"in": [{
+            "amount": 1_000_000_000_000,
+            "txid": "tx123",
+            "confirmations": 10,
+            "locked": False,
+        }], "pending": [], "pool": []}
     }))
     status = await monero.get_invoice_status(invoice.checking_id)
     assert status.settled
@@ -206,6 +211,39 @@ async def test_monero_get_invoice_status_under_confirmed():
     respx.post(RPC_URL).mock(return_value=Response(200, json={
         "jsonrpc": "2.0", "id": "0",
         "result": {"in": [{"amount": 1_000_000_000_000, "txid": "tx123", "confirmations": 3}]}
+    }))
+    status = await monero.get_invoice_status(invoice.checking_id)
+    assert status.pending
+    assert not status.settled
+
+
+@respx.mock
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "lock_fields",
+    [
+        {"unlock_time": 999_999_999, "locked": True},
+        {"unlock_time": 999_999_999},
+    ],
+    ids=["explicitly-locked", "missing-lock-status"],
+)
+async def test_monero_get_invoice_status_locked(lock_fields):
+    # A transfer can have enough confirmations while a custom unlock_time still
+    # prevents the mint from spending it. It must not back liquid ecash yet.
+    respx.post(RPC_URL).mock(return_value=Response(200, json={
+        "jsonrpc": "2.0", "id": "0",
+        "result": {"address": VALID_SUBADDRESS, "address_index": 1}
+    }))
+    invoice = await monero.create_invoice(Amount(Unit.pxmr, 1_000_000_000_000))
+
+    respx.post(RPC_URL).mock(return_value=Response(200, json={
+        "jsonrpc": "2.0", "id": "0",
+        "result": {"in": [{
+            "amount": 1_000_000_000_000,
+            "txid": "tx-locked",
+            "confirmations": 10,
+            **lock_fields,
+        }]}
     }))
     status = await monero.get_invoice_status(invoice.checking_id)
     assert status.pending
