@@ -63,8 +63,7 @@ class MoneroBackend(LightningBackend):
         # tokens they've already paid for). None = in-memory only.
         self.state_file = state_file
 
-        self.pending_deposits: dict[str, dict] = self._load_state()
-        self.pending_payments: dict[str, dict] = {}
+        self.pending_deposits, self.pending_payments = self._load_state()
         # Queue for incoming payment notifications
         self.paid_invoices_queue: asyncio.Queue[str] = asyncio.Queue()
 
@@ -72,28 +71,44 @@ class MoneroBackend(LightningBackend):
         self.poll_interval = 5
         self._polling_task: Optional[asyncio.Task] = None
 
-    def _load_state(self) -> dict:
-        """Load persisted deposit-tracking state from disk (if configured)."""
+    def _load_state(self) -> tuple[dict[str, dict], dict[str, dict]]:
+        """Load deposit and outgoing-payment state, including legacy files."""
         if not self.state_file or not os.path.exists(self.state_file):
-            return {}
+            return {}, {}
         try:
             with open(self.state_file) as f:
-                return json.load(f)
+                state = json.load(f)
+                if "pending_deposits" in state or "pending_payments" in state:
+                    return (
+                        state.get("pending_deposits", {}),
+                        state.get("pending_payments", {}),
+                    )
+                # Before outgoing payments were persisted, this file was the
+                # pending-deposit mapping itself. Keep those files readable.
+                return state, {}
         except (OSError, ValueError):
-            logger.error(f"Could not read Monero deposit state from {self.state_file}")
-            return {}
+            logger.error(f"Could not read Monero state from {self.state_file}")
+            return {}, {}
 
-    def _save_state(self) -> None:
-        """Persist deposit-tracking state to disk via an atomic replace."""
+    def _save_state(self) -> bool:
+        """Persist payment state via an atomic replace."""
         if not self.state_file:
-            return
+            return True
         try:
             tmp = f"{self.state_file}.tmp"
             with open(tmp, "w") as f:
-                json.dump(self.pending_deposits, f)
+                json.dump(
+                    {
+                        "pending_deposits": self.pending_deposits,
+                        "pending_payments": self.pending_payments,
+                    },
+                    f,
+                )
             os.replace(tmp, self.state_file)
+            return True
         except OSError as e:
-            logger.error(f"Could not persist Monero deposit state: {e}")
+            logger.error(f"Could not persist Monero state: {e}")
+            return False
 
     @staticmethod
     def validate_monero_address(address: str) -> tuple[bool, str]:
@@ -253,23 +268,87 @@ class MoneroBackend(LightningBackend):
             return PaymentResponse(result=PaymentResult.FAILED, error_message="Invalid Monero address")
 
         try:
-            result = await self._rpc_call("transfer", {
-                "destinations": [{"amount": amount, "address": address}],
-                "priority": 1,
-                "get_tx_key": True
-            })
+            # Build first and relay separately. Retrying a relaying `transfer`
+            # after a timeout can pay the recipient twice because the request
+            # is not idempotent. A do-not-relay build is safe to abandon, and
+            # retrying `relay_tx` reuses the exact same signed transaction.
+            result = await self._rpc_call(
+                "transfer",
+                {
+                    "destinations": [{"amount": amount, "address": address}],
+                    "priority": 1,
+                    "do_not_relay": True,
+                    "get_tx_key": True,
+                    "get_tx_metadata": True,
+                },
+                retries=1,
+            )
 
             tx_hash = result.get("tx_hash")
-            if not tx_hash:
-                return PaymentResponse(result=PaymentResult.FAILED, error_message="No tx_hash returned")
+            tx_metadata = result.get("tx_metadata")
+            if not tx_hash or not tx_metadata:
+                return PaymentResponse(
+                    result=PaymentResult.FAILED,
+                    error_message="Transaction build returned incomplete metadata",
+                )
 
-            self.pending_payments[tx_hash] = {"tx_hash": tx_hash, "amount": amount, "fee": result.get("fee", 0)}
+            fee = int(result.get("fee", 0))
+            if fee > quote.fee_reserve:
+                return PaymentResponse(
+                    result=PaymentResult.FAILED,
+                    checking_id=tx_hash,
+                    error_message="Monero fee exceeds the quoted reserve",
+                )
+
+            self.pending_payments[tx_hash] = {
+                "tx_hash": tx_hash,
+                "tx_metadata": tx_metadata,
+                "amount": amount,
+                "fee": fee,
+                "relayed": False,
+            }
+            # Never relay a transaction whose recovery metadata could not be
+            # saved: a process crash after an ambiguous relay would otherwise
+            # leave the Cashu melt unable to determine whether XMR was sent.
+            if not self._save_state():
+                self.pending_payments.pop(tx_hash, None)
+                return PaymentResponse(
+                    result=PaymentResult.FAILED,
+                    checking_id=tx_hash,
+                    error_message="Could not persist outgoing payment state",
+                )
+
+            try:
+                relay = await self._rpc_call(
+                    "relay_tx", {"hex": tx_metadata}, retries=1
+                )
+                relay_hash = relay.get("tx_hash")
+                if relay_hash and relay_hash != tx_hash:
+                    return PaymentResponse(
+                        result=PaymentResult.PENDING,
+                        checking_id=tx_hash,
+                        fee=Amount(self.unit, fee),
+                        error_message="Relay returned an unexpected transaction hash",
+                    )
+                self.pending_payments[tx_hash]["relayed"] = True
+                self._save_state()
+            except MoneroRPCError as e:
+                # The relay may have reached wallet-rpc before the response was
+                # lost. Keep the proofs pending and retry this same metadata on
+                # the next status check; never construct a second payment.
+                return PaymentResponse(
+                    result=PaymentResult.PENDING,
+                    checking_id=tx_hash,
+                    fee=Amount(self.unit, fee),
+                    error_message=str(e),
+                )
 
             return PaymentResponse(
-                result=PaymentResult.SETTLED,
+                # Broadcasting is not settlement. Cashu keeps the proofs
+                # pending until get_transfer_by_txid reports a confirmation.
+                result=PaymentResult.PENDING,
                 checking_id=tx_hash,
-                fee=Amount(self.unit, result.get("fee", 0)),
-                preimage=tx_hash
+                fee=Amount(self.unit, fee),
             )
         except MoneroRPCError as e:
             # check if it's insufficient funds
@@ -297,6 +376,12 @@ class MoneroBackend(LightningBackend):
             })
 
             for tx in result.get("in", []):
+                # A confirmed output can still be locked by the transaction's
+                # unlock_time. Do not issue liquid ecash until the wallet says
+                # the backing output is spendable. Treat a missing `locked`
+                # field as locked so an incompatible RPC response fails safe.
+                if tx.get("locked", True):
+                    continue
                 if tx.get("confirmations", 0) < self.min_confirmations:
                     continue
                 if tx.get("amount", 0) >= deposit["amount"]:
@@ -315,16 +400,57 @@ class MoneroBackend(LightningBackend):
 
     async def get_payment_status(self, checking_id: str) -> PaymentStatus:
         """Check outgoing payment status."""
-        if checking_id in self.pending_payments:
-            return PaymentStatus(result=PaymentResult.SETTLED)
+        payment = self.pending_payments.get(checking_id)
+        relay_error = None
+        if payment and not payment.get("relayed"):
+            try:
+                result = await self._rpc_call(
+                    "relay_tx", {"hex": payment["tx_metadata"]}, retries=1
+                )
+                relay_hash = result.get("tx_hash")
+                if relay_hash and relay_hash != checking_id:
+                    return PaymentStatus(
+                        result=PaymentResult.PENDING,
+                        error_message="Relay returned an unexpected transaction hash",
+                    )
+                payment["relayed"] = True
+                self._save_state()
+            except MoneroRPCError as e:
+                # A previous relay may have succeeded even when its response
+                # was lost. Query by the already-known txid before deciding.
+                relay_error = str(e)
 
         try:
             result = await self._rpc_call("get_transfer_by_txid", {"txid": checking_id})
-            if result.get("transfer", {}).get("confirmations", 0) > 0:
-                return PaymentStatus(result=PaymentResult.SETTLED, preimage=checking_id)
-            return PaymentStatus(result=PaymentResult.PENDING)
-        except MoneroRPCError:
-            return PaymentStatus(result=PaymentResult.UNKNOWN)
+            transfer = result.get("transfer", {})
+            fee = int(transfer.get("fee", payment.get("fee", 0) if payment else 0))
+            if payment and transfer.get("type") in ("out", "pending"):
+                payment["relayed"] = True
+                self._save_state()
+            if transfer.get("type") == "failed":
+                self.pending_payments.pop(checking_id, None)
+                self._save_state()
+                return PaymentStatus(result=PaymentResult.FAILED)
+            if transfer.get("confirmations", 0) > 0:
+                self.pending_payments.pop(checking_id, None)
+                self._save_state()
+                return PaymentStatus(
+                    result=PaymentResult.SETTLED,
+                    fee=Amount(self.unit, fee),
+                    preimage=checking_id,
+                )
+            return PaymentStatus(
+                result=PaymentResult.PENDING,
+                fee=Amount(self.unit, fee),
+                error_message=relay_error,
+            )
+        except MoneroRPCError as e:
+            if payment:
+                return PaymentStatus(
+                    result=PaymentResult.PENDING,
+                    error_message=relay_error or str(e),
+                )
+            return PaymentStatus(result=PaymentResult.UNKNOWN, error_message=str(e))
 
     async def _estimate_fee(self, address: str, amount: int) -> int:
         """Estimate the fee reserve for a withdrawal.
@@ -342,7 +468,7 @@ class MoneroBackend(LightningBackend):
                     "priority": 1,
                     "do_not_relay": True,
                     "get_tx_metadata": True,
-                })
+                }, retries=1)
                 fee = int(result.get("fee", 0))
                 if fee > 0:
                     return fee + fee // 2  # +50% headroom
