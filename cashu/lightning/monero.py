@@ -25,7 +25,6 @@ from .base import (
 
 class MoneroRPCError(Exception):
     """Monero RPC error with optional error code."""
-
     def __init__(self, message: str, code: Optional[int] = None):
         self.code = code
         super().__init__(message)
@@ -48,7 +47,7 @@ class MoneroBackend(LightningBackend):
         min_confirmations: int = 10,
         state_file: Optional[str] = None,
         fee_reserve_fallback: int = 100_000_000,
-        **kwargs,
+        **kwargs
     ):
         self.unit = unit
         self.rpc_url = rpc_url
@@ -118,7 +117,7 @@ class MoneroBackend(LightningBackend):
             return False, "Address is empty"
 
         # mainnet: 4/8, testnet: 9/A, stagenet: 5/7
-        if address[0] not in ("4", "8", "9", "A", "5", "7"):
+        if address[0] not in ('4', '8', '9', 'A', '5', '7'):
             return False, f"Invalid address prefix '{address[0]}'"
 
         if len(address) not in (95, 106):
@@ -139,14 +138,11 @@ class MoneroBackend(LightningBackend):
         Fails closed on any RPC error.
         """
         try:
-            result = await self._rpc_call(
-                "validate_address",
-                {
-                    "address": address,
-                    "any_net_type": False,
-                    "allow_openalias": False,
-                },
-            )
+            result = await self._rpc_call("validate_address", {
+                "address": address,
+                "any_net_type": False,
+                "allow_openalias": False,
+            })
             return bool(result.get("valid"))
         except MoneroRPCError:
             return False
@@ -173,31 +169,16 @@ class MoneroBackend(LightningBackend):
 
         return address, amount, description
 
-    async def _rpc_call(
-        self, method: str, params: Optional[dict] = None, retries: int = 3
-    ) -> dict:
+    async def _rpc_call(self, method: str, params: Optional[dict] = None, retries: int = 3) -> dict:
         """Make JSON-RPC call to Monero wallet with retries."""
-        payload = {
-            "jsonrpc": "2.0",
-            "id": "0",
-            "method": method,
-            "params": params or {},
-        }
-        auth = (
-            httpx.DigestAuth(self.rpc_username, self.rpc_password)
-            if self.rpc_username and self.rpc_password
-            else None
-        )
+        payload = {"jsonrpc": "2.0", "id": "0", "method": method, "params": params or {}}
+        auth = httpx.DigestAuth(self.rpc_username, self.rpc_password) if self.rpc_username and self.rpc_password else None
 
         last_error: Optional[Exception] = None
         for attempt in range(retries):
             try:
                 async with httpx.AsyncClient() as client:
-                    kwargs: dict = {
-                        "url": self.rpc_url,
-                        "json": payload,
-                        "timeout": 30.0,
-                    }
+                    kwargs: dict = {"url": self.rpc_url, "json": payload, "timeout": 30.0}
                     if auth:
                         kwargs["auth"] = auth
                     response = await client.post(**kwargs)
@@ -207,11 +188,7 @@ class MoneroBackend(LightningBackend):
                     if "error" in result:
                         err = result["error"]
                         code = err.get("code") if isinstance(err, dict) else None
-                        msg = (
-                            err.get("message", str(err))
-                            if isinstance(err, dict)
-                            else str(err)
-                        )
+                        msg = err.get("message", str(err)) if isinstance(err, dict) else str(err)
                         raise MoneroRPCError(msg, code=code)
 
                     return result.get("result", {})
@@ -239,9 +216,7 @@ class MoneroBackend(LightningBackend):
         try:
             result = await self._rpc_call("get_balance")
             unlocked = result.get("unlocked_balance", 0)
-            return StatusResponse(
-                balance=Amount(self.unit, unlocked), error_message=None
-            )
+            return StatusResponse(balance=Amount(self.unit, unlocked), error_message=None)
         except MoneroRPCError as e:
             logger.error(f"Monero status error: {e}")
             return StatusResponse(balance=Amount(self.unit, 0), error_message=str(e))
@@ -254,36 +229,28 @@ class MoneroBackend(LightningBackend):
     ) -> InvoiceResponse:
         """Create a subaddress for deposit."""
         try:
-            result = await self._rpc_call(
-                "create_address", {"account_index": 0, "label": memo or "cashu"}
-            )
+            result = await self._rpc_call("create_address", {"account_index": 0, "label": memo or "cashu"})
             address = result.get("address")
             if not address:
-                return InvoiceResponse(
-                    ok=False, error_message="Failed to create subaddress"
-                )
+                return InvoiceResponse(ok=False, error_message="Failed to create subaddress")
 
             checking_id = hashlib.sha256(address.encode()).hexdigest()
             self.pending_deposits[checking_id] = {
                 "address": address,
                 "address_index": result.get("address_index"),
                 "amount": amount.amount,
-                "paid": False,
+                "paid": False
             }
             self._save_state()
 
             amount_xmr = Decimal(amount.amount) / Decimal(10**12)
             payment_request = f"monero:{address}?tx_amount={amount_xmr:.12f}"
 
-            return InvoiceResponse(
-                ok=True, checking_id=checking_id, payment_request=payment_request
-            )
+            return InvoiceResponse(ok=True, checking_id=checking_id, payment_request=payment_request)
         except MoneroRPCError as e:
             return InvoiceResponse(ok=False, error_message=str(e))
 
-    async def pay_invoice(
-        self, quote: MeltQuote, fee_limit_msat: int
-    ) -> PaymentResponse:
+    async def pay_invoice(self, quote: MeltQuote, fee_limit_msat: int) -> PaymentResponse:
         """Send XMR to address in quote.request."""
         try:
             address, parsed_amount, _ = self._parse_monero_uri(quote.request)
@@ -292,17 +259,13 @@ class MoneroBackend(LightningBackend):
 
         amount = quote.amount if quote.amount > 0 else parsed_amount
         if amount <= 0:
-            return PaymentResponse(
-                result=PaymentResult.FAILED, error_message="Amount must be positive"
-            )
+            return PaymentResponse(result=PaymentResult.FAILED, error_message="Amount must be positive")
 
         # Last line of defence before funds leave: the static parse only checked
         # format. Verify the checksum/network with the wallet itself — sending to
         # an address that merely "looks" valid would lose the XMR for good.
         if not await self.validate_address_rpc(address):
-            return PaymentResponse(
-                result=PaymentResult.FAILED, error_message="Invalid Monero address"
-            )
+            return PaymentResponse(result=PaymentResult.FAILED, error_message="Invalid Monero address")
 
         try:
             # Build first and relay separately. Retrying a relaying `transfer`
@@ -390,9 +353,7 @@ class MoneroBackend(LightningBackend):
         except MoneroRPCError as e:
             # check if it's insufficient funds
             if e.code in (-17, -20):
-                return PaymentResponse(
-                    result=PaymentResult.FAILED, error_message="Insufficient funds"
-                )
+                return PaymentResponse(result=PaymentResult.FAILED, error_message="Insufficient funds")
             return PaymentResponse(result=PaymentResult.FAILED, error_message=str(e))
 
     async def get_invoice_status(self, checking_id: str) -> PaymentStatus:
@@ -402,22 +363,17 @@ class MoneroBackend(LightningBackend):
 
         deposit = self.pending_deposits[checking_id]
         if deposit.get("paid"):
-            return PaymentStatus(
-                result=PaymentResult.SETTLED, preimage=deposit.get("tx_hash")
-            )
+            return PaymentStatus(result=PaymentResult.SETTLED, preimage=deposit.get("tx_hash"))
 
         try:
             # Only confirmed incoming transfers count. A transfer still in the
             # txpool has zero confirmations and can be dropped before it mines,
             # so crediting it would let a depositor mint tokens against funds
             # the mint never actually receives.
-            result = await self._rpc_call(
-                "get_transfers",
-                {
-                    "in": True,
-                    "subaddr_indices": [deposit["address_index"]],
-                },
-            )
+            result = await self._rpc_call("get_transfers", {
+                "in": True,
+                "subaddr_indices": [deposit["address_index"]],
+            })
 
             for tx in result.get("in", []):
                 # A confirmed output can still be locked by the transaction's
@@ -436,9 +392,7 @@ class MoneroBackend(LightningBackend):
                         self.paid_invoices_queue.put_nowait(checking_id)
                     except asyncio.QueueFull:
                         pass
-                    return PaymentStatus(
-                        result=PaymentResult.SETTLED, preimage=tx.get("txid")
-                    )
+                    return PaymentStatus(result=PaymentResult.SETTLED, preimage=tx.get("txid"))
 
             return PaymentStatus(result=PaymentResult.PENDING)
         except MoneroRPCError as e:
@@ -509,16 +463,12 @@ class MoneroBackend(LightningBackend):
         """
         if amount > 0:
             try:
-                result = await self._rpc_call(
-                    "transfer",
-                    {
-                        "destinations": [{"amount": amount, "address": address}],
-                        "priority": 1,
-                        "do_not_relay": True,
-                        "get_tx_metadata": True,
-                    },
-                    retries=1,
-                )
+                result = await self._rpc_call("transfer", {
+                    "destinations": [{"amount": amount, "address": address}],
+                    "priority": 1,
+                    "do_not_relay": True,
+                    "get_tx_metadata": True,
+                }, retries=1)
                 fee = int(result.get("fee", 0))
                 if fee > 0:
                     return fee + fee // 2  # +50% headroom
@@ -526,9 +476,7 @@ class MoneroBackend(LightningBackend):
                 pass
         return self.fee_reserve_fallback
 
-    async def get_payment_quote(
-        self, melt_quote: PostMeltQuoteRequest
-    ) -> PaymentQuoteResponse:
+    async def get_payment_quote(self, melt_quote: PostMeltQuoteRequest) -> PaymentQuoteResponse:
         """Get quote for payment (with a live fee estimate)."""
         address, amount, _ = self._parse_monero_uri(melt_quote.request)
         fee = await self._estimate_fee(address, amount)
