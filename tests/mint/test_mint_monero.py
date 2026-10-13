@@ -24,6 +24,13 @@ VALID_TESTNET_ADDRESS = "9" + "F" * 94
 VALID_TESTNET_SUBADDRESS = "A" + "G" * 94
 
 
+@pytest.fixture(autouse=True)
+def forget_deposits():
+    # Every mock returns the same address, so a shared backend still holding
+    # it from an earlier test would loop forever looking for a fresh one.
+    monero.pending_deposits.clear()
+
+
 class TestAddressValidation:
     def test_valid_addresses(self):
         for addr in [VALID_ADDRESS, VALID_SUBADDRESS, VALID_INTEGRATED,
@@ -110,6 +117,23 @@ async def test_monero_create_invoice_failure():
     }))
     invoice = await monero.create_invoice(Amount(Unit.pxmr, 1_000_000_000_000))
     assert not invoice.ok
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_monero_create_invoice_skips_reissued_address():
+    respx.post(RPC_URL).mock(side_effect=[
+        Response(200, json={"jsonrpc": "2.0", "id": "0", "result": {"address": VALID_SUBADDRESS, "address_index": 1}}),
+        Response(200, json={"jsonrpc": "2.0", "id": "0", "result": {"address": VALID_SUBADDRESS, "address_index": 1}}),
+        Response(200, json={"jsonrpc": "2.0", "id": "0", "result": {"address": VALID_STAGENET_SUBADDRESS, "address_index": 2}}),
+    ])
+    backend = MoneroBackend(unit=Unit.pxmr, rpc_url=RPC_URL)
+    first = await backend.create_invoice(Amount(Unit.pxmr, 100_000_000_000_000))
+    second = await backend.create_invoice(Amount(Unit.pxmr, 1_000_000_000))
+
+    assert first.checking_id != second.checking_id
+    assert backend.pending_deposits[first.checking_id]["amount"] == 100_000_000_000_000
+    assert backend.pending_deposits[second.checking_id]["address_index"] == 2
 
 
 @respx.mock

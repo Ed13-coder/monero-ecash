@@ -236,12 +236,19 @@ class MoneroBackend(LightningBackend):
     ) -> InvoiceResponse:
         """Create a subaddress for deposit."""
         try:
-            result = await self._rpc_call("create_address", {"account_index": 0, "label": memo or "cashu"})
-            address = result.get("address")
-            if not address:
-                return InvoiceResponse(ok=False, error_message="Failed to create subaddress")
+            while True:
+                result = await self._rpc_call("create_address", {"account_index": 0, "label": memo or "cashu"})
+                address = result.get("address")
+                if not address:
+                    return InvoiceResponse(ok=False, error_message="Failed to create subaddress")
 
-            checking_id = hashlib.sha256(address.encode()).hexdigest()
+                checking_id = hashlib.sha256(address.encode()).hexdigest()
+                if checking_id not in self.pending_deposits:
+                    break
+                # wallet-rpc only saves its subaddress count on store or a clean
+                # exit, so after a crash it hands out addresses again.
+                logger.warning(f"wallet-rpc reissued deposit address {address}, skipping it")
+
             self.pending_deposits[checking_id] = {
                 "address": address,
                 "address_index": result.get("address_index"),
