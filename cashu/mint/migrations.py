@@ -6,7 +6,7 @@ from sqlalchemy import RowMapping
 
 from ..core.base import MeltQuoteState, MintKeyset, MintQuoteState, Proof
 from ..core.crypto.keys import derive_keyset_id, derive_keyset_id_deprecated
-from ..core.db import Connection, Database
+from ..core.db import POSTGRES, Connection, Database
 from ..core.settings import settings
 
 
@@ -1157,3 +1157,24 @@ async def m029_remove_overlong_witness_values(db: Database):
             f"UPDATE {db.table_with_schema('proofs_pending')} SET witness = NULL "
             "WHERE witness IS NOT NULL AND LENGTH(witness) > 1024"
         )
+
+
+async def m030_widen_keyset_balances(db: Database):
+    """
+    Keyset balances were added as 32 bit columns, which piconero amounts
+    overflow after about 0.002 XMR. SQLite integers are already 64 bit.
+    """
+    if db.type != POSTGRES:
+        return
+    async with db.connect() as conn:
+        for table, column in [
+            ("keysets", "balance"),
+            ("keysets", "fees_paid"),
+            ("balance_log", "keyset_balance"),
+            ("balance_log", "keyset_fees_paid"),
+            ("balance_log", "backend_balance"),
+        ]:
+            await conn.execute(
+                f"ALTER TABLE {db.table_with_schema(table)} "
+                f"ALTER COLUMN {column} TYPE BIGINT"
+            )

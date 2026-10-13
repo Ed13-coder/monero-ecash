@@ -5,7 +5,7 @@ import pytest
 import pytest_asyncio
 from fastapi import WebSocket
 
-from cashu.core.base import MeltQuoteState, MintQuoteState
+from cashu.core.base import Amount, MeltQuoteState, MintQuoteState
 from cashu.core.errors import ProofsArePendingError
 from cashu.core.json_rpc.base import (
     JSONRPCMethods,
@@ -477,3 +477,25 @@ async def test_get_melt_quotes_by_checking_id_different_checking_ids(ledger: Led
     )
     assert len(quotes_2) == 1
     assert quotes_2[0].quote == "quote_id_diff_2"
+
+
+@pytest.mark.asyncio
+async def test_keyset_balance_above_32_bits(ledger: Ledger):
+    amount = 2**40
+    await ledger.crud.bump_keyset_balance(
+        keyset=ledger.keyset, amount=amount, db=ledger.db
+    )
+    await ledger.crud.bump_keyset_fees_paid(
+        keyset=ledger.keyset, amount=amount, db=ledger.db
+    )
+    keyset = (await ledger.crud.get_keyset(db=ledger.db, id=ledger.keyset.id))[0]
+    assert keyset.balance >= amount
+    assert keyset.fees_paid >= amount
+
+    big = Amount(ledger.keyset.unit, amount)
+    await ledger.crud.store_balance_log(big, big, big, db=ledger.db)
+    entry = await ledger.crud.get_last_balance_log_entry(
+        unit=ledger.keyset.unit, db=ledger.db
+    )
+    assert entry
+    assert entry.keyset_balance.amount == amount
