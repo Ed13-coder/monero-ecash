@@ -22,6 +22,10 @@ VALID_STAGENET_ADDRESS = "5" + "D" * 94
 VALID_STAGENET_SUBADDRESS = "7" + "E" * 94
 VALID_TESTNET_ADDRESS = "9" + "F" * 94
 VALID_TESTNET_SUBADDRESS = "A" + "G" * 94
+NOT_OUR_ADDRESS_ERROR = Response(200, json={
+    "jsonrpc": "2.0", "id": "0",
+    "error": {"code": -2, "message": "Address doesn't belong to the wallet"},
+})
 
 
 class TestAddressValidation:
@@ -459,10 +463,10 @@ async def test_monero_get_invoice_status_pool_not_credited():
 @pytest.mark.asyncio
 async def test_monero_get_payment_quote():
     # fee is estimated from a do-not-relay dry-run (+50% headroom), not hardcoded
-    respx.post(RPC_URL).mock(return_value=Response(200, json={
+    respx.post(RPC_URL).mock(side_effect=[NOT_OUR_ADDRESS_ERROR, Response(200, json={
         "jsonrpc": "2.0", "id": "0",
         "result": {"fee": 120_000_000}
-    }))
+    })])
     req = PostMeltQuoteRequest(unit=Unit.pxmr.name, request=f"monero:{VALID_ADDRESS}?tx_amount=1.0")
     quote = await monero.get_payment_quote(req)
     assert quote.amount.amount == 1_000_000_000_000
@@ -471,11 +475,25 @@ async def test_monero_get_payment_quote():
 
 @respx.mock
 @pytest.mark.asyncio
-async def test_monero_get_payment_quote_ids_are_unique():
-    respx.post(RPC_URL).mock(return_value=Response(200, json={
+async def test_monero_get_payment_quote_rejects_own_address():
+    route = respx.post(RPC_URL).mock(return_value=Response(200, json={
         "jsonrpc": "2.0", "id": "0",
-        "result": {"fee": 120_000_000}
+        "result": {"index": {"major": 0, "minor": 3}}
     }))
+    req = PostMeltQuoteRequest(unit=Unit.pxmr.name, request=VALID_SUBADDRESS)
+    with pytest.raises(MoneroRPCError):
+        await monero.get_payment_quote(req)
+    methods = [json.loads(call.request.content)["method"] for call in route.calls]
+    assert methods == ["get_address_index"]
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_monero_get_payment_quote_ids_are_unique():
+    fee_estimate = Response(200, json={"jsonrpc": "2.0", "id": "0", "result": {"fee": 120_000_000}})
+    respx.post(RPC_URL).mock(side_effect=[
+        NOT_OUR_ADDRESS_ERROR, fee_estimate, NOT_OUR_ADDRESS_ERROR, fee_estimate,
+    ])
     req = PostMeltQuoteRequest(unit=Unit.pxmr.name, request=f"monero:{VALID_ADDRESS}?tx_amount=1.0")
     first = await monero.get_payment_quote(req)
     second = await monero.get_payment_quote(req)

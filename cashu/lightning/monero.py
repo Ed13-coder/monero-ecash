@@ -472,6 +472,17 @@ class MoneroBackend(LightningBackend):
     async def get_payment_quote(self, melt_quote: PostMeltQuoteRequest) -> PaymentQuoteResponse:
         """Get quote for payment (with a live fee estimate)."""
         address, amount, _ = self._parse_monero_uri(melt_quote.request)
+        # The wallet files a transfer to one of its own subaddresses as change,
+        # so a deposit quote paid this way would never see the money. Only the
+        # quote's exact request is settled internally by the ledger.
+        try:
+            await self._rpc_call("get_address_index", {"address": address})
+        except MoneroRPCError as e:
+            # -2 is "Address doesn't belong to the wallet".
+            if e.code != -2:
+                raise
+        else:
+            raise MoneroRPCError("Address belongs to this mint, use the mint quote's request")
         fee = await self._estimate_fee(address, amount)
 
         # Unlike a bolt11 invoice, the same address and amount can rightly be
