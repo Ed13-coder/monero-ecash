@@ -68,6 +68,8 @@ class MoneroBackend(LightningBackend):
         # Queue for incoming payment notifications
         self.paid_invoices_queue: asyncio.Queue[str] = asyncio.Queue()
 
+        self._pay_lock = asyncio.Lock()
+
         # Polling interval for checking incoming payments (seconds)
         self.poll_interval = 5
         self._polling_task: Optional[asyncio.Task] = None
@@ -268,84 +270,87 @@ class MoneroBackend(LightningBackend):
         if not await self.validate_address_rpc(address):
             return PaymentResponse(result=PaymentResult.FAILED, error_message="Invalid Monero address")
 
-        try:
-            # Build first and relay separately. Retrying a relaying `transfer`
-            # after a timeout can pay the recipient twice because the request
-            # is not idempotent. A do-not-relay build is safe to abandon, and
-            # retrying `relay_tx` reuses the exact same signed transaction.
-            result = await self._rpc_call(
-                "transfer",
-                {
-                    "destinations": [{"amount": amount, "address": address}],
-                    "priority": 1,
-                    "do_not_relay": True,
-                    "get_tx_key": True,
-                    "get_tx_metadata": True,
-                },
-                retries=1,
-            )
-
-            tx_hash = result.get("tx_hash")
-            tx_metadata = result.get("tx_metadata")
-            if not tx_hash or not tx_metadata:
-                return PaymentResponse(
-                    result=PaymentResult.FAILED,
-                    error_message="Transaction build returned incomplete metadata",
-                )
-
-            fee = int(result.get("fee", 0))
-            if fee > quote.fee_reserve:
-                return PaymentResponse(
-                    result=PaymentResult.FAILED,
-                    error_message="Monero fee exceeds the quoted reserve",
-                )
-
-            # Keyed by the quote, not the txid, so the ledger can still find
-            # it after a restart that came before it stored the txid.
-            self.pending_payments[quote.checking_id] = {
-                "tx_hash": tx_hash,
-                "tx_metadata": tx_metadata,
-                "amount": amount,
-                "fee": fee,
-            }
-            # Never relay a transaction whose recovery metadata could not be
-            # saved: a process crash after an ambiguous relay would otherwise
-            # leave the Cashu melt unable to determine whether XMR was sent.
-            if not self._save_state():
-                self.pending_payments.pop(quote.checking_id, None)
-                return PaymentResponse(
-                    result=PaymentResult.FAILED,
-                    error_message="Could not persist outgoing payment state",
-                )
-
+        # wallet-rpc does not reserve the inputs of a do_not_relay build, so a
+        # second build before the first is relayed can pick the same outputs.
+        async with self._pay_lock:
             try:
-                await self._rpc_call("relay_tx", {"hex": tx_metadata}, retries=1)
-            except MoneroRPCError as e:
-                # The relay may have reached wallet-rpc before the response was
-                # lost. Keep the proofs pending and let the status check decide;
-                # never construct a second payment.
+                # Build first and relay separately. Retrying a relaying `transfer`
+                # after a timeout can pay the recipient twice because the request
+                # is not idempotent. A do-not-relay build is safe to abandon, and
+                # retrying `relay_tx` reuses the exact same signed transaction.
+                result = await self._rpc_call(
+                    "transfer",
+                    {
+                        "destinations": [{"amount": amount, "address": address}],
+                        "priority": 1,
+                        "do_not_relay": True,
+                        "get_tx_key": True,
+                        "get_tx_metadata": True,
+                    },
+                    retries=1,
+                )
+
+                tx_hash = result.get("tx_hash")
+                tx_metadata = result.get("tx_metadata")
+                if not tx_hash or not tx_metadata:
+                    return PaymentResponse(
+                        result=PaymentResult.FAILED,
+                        error_message="Transaction build returned incomplete metadata",
+                    )
+
+                fee = int(result.get("fee", 0))
+                if fee > quote.fee_reserve:
+                    return PaymentResponse(
+                        result=PaymentResult.FAILED,
+                        error_message="Monero fee exceeds the quoted reserve",
+                    )
+
+                # Keyed by the quote, not the txid, so the ledger can still find
+                # it after a restart that came before it stored the txid.
+                self.pending_payments[quote.checking_id] = {
+                    "tx_hash": tx_hash,
+                    "tx_metadata": tx_metadata,
+                    "amount": amount,
+                    "fee": fee,
+                }
+                # Never relay a transaction whose recovery metadata could not be
+                # saved: a process crash after an ambiguous relay would otherwise
+                # leave the Cashu melt unable to determine whether XMR was sent.
+                if not self._save_state():
+                    self.pending_payments.pop(quote.checking_id, None)
+                    return PaymentResponse(
+                        result=PaymentResult.FAILED,
+                        error_message="Could not persist outgoing payment state",
+                    )
+
+                try:
+                    await self._rpc_call("relay_tx", {"hex": tx_metadata}, retries=1)
+                except MoneroRPCError as e:
+                    # The relay may have reached wallet-rpc before the response was
+                    # lost. Keep the proofs pending and let the status check decide;
+                    # never construct a second payment.
+                    return PaymentResponse(
+                        result=PaymentResult.PENDING,
+                        checking_id=quote.checking_id,
+                        fee=Amount(self.unit, fee),
+                        error_message=str(e),
+                    )
+
+                # No metadata left means the tx was relayed, so get_payment_status
+                # will never relay it again.
+                del self.pending_payments[quote.checking_id]["tx_metadata"]
+                self._save_state()
                 return PaymentResponse(
-                    result=PaymentResult.PENDING,
+                    result=PaymentResult.SETTLED,
                     checking_id=quote.checking_id,
                     fee=Amount(self.unit, fee),
-                    error_message=str(e),
+                    preimage=tx_hash,
                 )
-
-            # No metadata left means the tx was relayed, so get_payment_status
-            # will never relay it again.
-            del self.pending_payments[quote.checking_id]["tx_metadata"]
-            self._save_state()
-            return PaymentResponse(
-                result=PaymentResult.SETTLED,
-                checking_id=quote.checking_id,
-                fee=Amount(self.unit, fee),
-                preimage=tx_hash,
-            )
-        except MoneroRPCError as e:
-            # check if it's insufficient funds
-            if e.code in (-17, -20):
-                return PaymentResponse(result=PaymentResult.FAILED, error_message="Insufficient funds")
-            return PaymentResponse(result=PaymentResult.FAILED, error_message=str(e))
+            except MoneroRPCError as e:
+                # check if it's insufficient funds
+                if e.code in (-17, -20):
+                    return PaymentResponse(result=PaymentResult.FAILED, error_message="Insufficient funds")
+                return PaymentResponse(result=PaymentResult.FAILED, error_message=str(e))
 
     async def get_invoice_status(self, checking_id: str) -> PaymentStatus:
         """Check if deposit was received."""
@@ -404,10 +409,11 @@ class MoneroBackend(LightningBackend):
             # -8 means the wallet has never seen this tx. relay_tx on a tx that
             # is already mined still succeeds, re-adds it as unconfirmed, and
             # wallet2 later marks its spent inputs unspent.
-            try:
-                await self._rpc_call("relay_tx", {"hex": payment["tx_metadata"]}, retries=1)
-            except MoneroRPCError as e:
-                return PaymentStatus(result=PaymentResult.PENDING, error_message=str(e))
+            async with self._pay_lock:
+                try:
+                    await self._rpc_call("relay_tx", {"hex": payment["tx_metadata"]}, retries=1)
+                except MoneroRPCError as e:
+                    return PaymentStatus(result=PaymentResult.PENDING, error_message=str(e))
             del payment["tx_metadata"]
             self._save_state()
             return PaymentStatus(

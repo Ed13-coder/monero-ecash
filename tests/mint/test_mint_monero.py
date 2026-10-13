@@ -1,5 +1,6 @@
 """Tests for Monero backend."""
 
+import asyncio
 import json
 
 import httpx
@@ -236,6 +237,38 @@ async def test_monero_pay_invoice_relay_timeout_stays_pending():
     assert backend.pending_payments["test"]["tx_metadata"] == "signed-transaction"
     methods = [json.loads(call.request.content)["method"] for call in route.calls]
     assert methods == ["validate_address", "transfer", "relay_tx"]
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_monero_pay_invoice_builds_one_withdrawal_at_a_time():
+    async def wallet_rpc(request):
+        await asyncio.sleep(0)
+        method = json.loads(request.content)["method"]
+        result = {"valid": True}
+        if method == "transfer":
+            result = {"tx_hash": f"tx{len(route.calls)}", "tx_metadata": "signed", "fee": 1}
+        return Response(200, json={"jsonrpc": "2.0", "id": "0", "result": result})
+
+    route = respx.post(RPC_URL).mock(side_effect=wallet_rpc)
+    backend = MoneroBackend(unit=Unit.pxmr, rpc_url=RPC_URL)
+    quotes = [
+        MeltQuote(
+            request=f"monero:{VALID_ADDRESS}",
+            quote=f"quote{i}", method="monero", checking_id=f"check{i}",
+            unit="pxmr", amount=1_000_000_000_000, fee_reserve=200_000_000,
+            state=MeltQuoteState.unpaid,
+        )
+        for i in range(2)
+    ]
+
+    payments = await asyncio.gather(*[backend.pay_invoice(q, 0) for q in quotes])
+
+    assert all(p.settled for p in payments)
+    methods = [json.loads(call.request.content)["method"] for call in route.calls]
+    assert [m for m in methods if m != "validate_address"] == [
+        "transfer", "relay_tx", "transfer", "relay_tx",
+    ]
 
 
 @respx.mock
