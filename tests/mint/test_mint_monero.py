@@ -138,14 +138,19 @@ async def test_monero_pay_invoice():
         state=MeltQuoteState.unpaid,
     )
     payment = await backend.pay_invoice(quote, 0)
-    assert payment.pending
-    assert not payment.settled
-    assert payment.checking_id == "abc123def456"
+    assert payment.settled
+    assert payment.checking_id == "test"
+    assert payment.preimage == "abc123def456"
     methods = [json.loads(call.request.content)["method"] for call in route.calls]
     assert methods == ["validate_address", "transfer", "relay_tx"]
     transfer_params = json.loads(route.calls[1].request.content)["params"]
     assert transfer_params["do_not_relay"] is True
     assert transfer_params["get_tx_metadata"] is True
+    assert backend.pending_payments["test"] == {
+        "tx_hash": "abc123def456",
+        "amount": 1_000_000_000_000,
+        "fee": 100_000_000,
+    }
 
 
 @respx.mock
@@ -227,7 +232,8 @@ async def test_monero_pay_invoice_relay_timeout_stays_pending():
     payment = await backend.pay_invoice(quote, 0)
 
     assert payment.pending
-    assert payment.checking_id == "tx-timeout"
+    assert payment.checking_id == "test"
+    assert backend.pending_payments["test"]["tx_metadata"] == "signed-transaction"
     methods = [json.loads(call.request.content)["method"] for call in route.calls]
     assert methods == ["validate_address", "transfer", "relay_tx"]
 
@@ -287,7 +293,7 @@ async def test_monero_pay_invoice_does_not_relay_if_state_cannot_be_saved(monkey
     payment = await backend.pay_invoice(quote, 0)
 
     assert payment.failed
-    assert "tx-not-saved" not in backend.pending_payments
+    assert backend.pending_payments == {}
     methods = [json.loads(call.request.content)["method"] for call in route.calls]
     assert methods == ["validate_address", "transfer"]
 
@@ -418,120 +424,102 @@ async def test_monero_get_payment_quote():
 
 @respx.mock
 @pytest.mark.asyncio
-async def test_monero_get_payment_status_retries_same_relay_metadata():
+async def test_monero_get_payment_quote_ids_are_unique():
+    respx.post(RPC_URL).mock(return_value=Response(200, json={
+        "jsonrpc": "2.0", "id": "0",
+        "result": {"fee": 120_000_000}
+    }))
+    req = PostMeltQuoteRequest(unit=Unit.pxmr.name, request=f"monero:{VALID_ADDRESS}?tx_amount=1.0")
+    first = await monero.get_payment_quote(req)
+    second = await monero.get_payment_quote(req)
+    assert first.checking_id != second.checking_id
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_monero_get_payment_status_relays_unseen_tx():
     route = respx.post(RPC_URL).mock(side_effect=[
+        Response(200, json={
+            "jsonrpc": "2.0", "id": "0",
+            "error": {"code": -8, "message": "Transaction not found."},
+        }),
         Response(200, json={
             "jsonrpc": "2.0", "id": "0", "result": {"tx_hash": "tx123"}
         }),
-        Response(200, json={
-            "jsonrpc": "2.0", "id": "0",
-            "result": {"transfer": {
-                "txid": "tx123", "type": "pending",
-                "confirmations": 0, "fee": 100_000_000,
-            }}
-        }),
     ])
     backend = MoneroBackend(unit=Unit.pxmr, rpc_url=RPC_URL)
-    backend.pending_payments["tx123"] = {
+    backend.pending_payments["test"] = {
         "tx_hash": "tx123",
         "tx_metadata": "same-signed-transaction",
         "amount": 1_000_000_000_000,
         "fee": 100_000_000,
-        "relayed": False,
     }
 
-    status = await backend.get_payment_status("tx123")
-
-    assert status.pending
-    methods = [json.loads(call.request.content)["method"] for call in route.calls]
-    assert methods == ["relay_tx", "get_transfer_by_txid"]
-    assert json.loads(route.calls[0].request.content)["params"]["hex"] == (
-        "same-signed-transaction"
-    )
-
-
-@respx.mock
-@pytest.mark.asyncio
-async def test_monero_get_payment_status_recovers_after_lost_relay_response():
-    route = respx.post(RPC_URL).mock(side_effect=[
-        Response(200, json={
-            "jsonrpc": "2.0", "id": "0",
-            "error": {"code": -4, "message": "already relayed"},
-        }),
-        Response(200, json={
-            "jsonrpc": "2.0", "id": "0",
-            "result": {"transfer": {
-                "txid": "tx123", "type": "out",
-                "confirmations": 1, "fee": 100_000_000,
-            }}
-        }),
-    ])
-    backend = MoneroBackend(unit=Unit.pxmr, rpc_url=RPC_URL)
-    backend.pending_payments["tx123"] = {
-        "tx_hash": "tx123",
-        "tx_metadata": "same-signed-transaction",
-        "amount": 1_000_000_000_000,
-        "fee": 100_000_000,
-        "relayed": False,
-    }
-
-    status = await backend.get_payment_status("tx123")
+    status = await backend.get_payment_status("test")
 
     assert status.settled
+    assert status.preimage == "tx123"
     methods = [json.loads(call.request.content)["method"] for call in route.calls]
-    assert methods == ["relay_tx", "get_transfer_by_txid"]
+    assert methods == ["get_transfer_by_txid", "relay_tx"]
+    assert json.loads(route.calls[1].request.content)["params"]["hex"] == (
+        "same-signed-transaction"
+    )
+    assert "tx_metadata" not in backend.pending_payments["test"]
 
 
 @respx.mock
 @pytest.mark.asyncio
-async def test_monero_get_payment_status_waits_for_confirmation():
-    respx.post(RPC_URL).mock(return_value=Response(200, json={
+@pytest.mark.parametrize("tx_type", ["pending", "out"])
+async def test_monero_get_payment_status_does_not_relay_known_tx(tx_type):
+    route = respx.post(RPC_URL).mock(return_value=Response(200, json={
         "jsonrpc": "2.0", "id": "0",
         "result": {"transfer": {
-            "txid": "tx123", "type": "pending",
-            "confirmations": 0, "fee": 100_000_000,
+            "txid": "tx123", "type": tx_type, "fee": 123_000_000,
         }}
     }))
     backend = MoneroBackend(unit=Unit.pxmr, rpc_url=RPC_URL)
-    backend.pending_payments["tx123"] = {
+    backend.pending_payments["test"] = {
         "tx_hash": "tx123",
         "tx_metadata": "signed-transaction",
         "amount": 1_000_000_000_000,
         "fee": 100_000_000,
-        "relayed": True,
     }
 
-    status = await backend.get_payment_status("tx123")
-
-    assert status.pending
-    assert not status.settled
-
-
-@respx.mock
-@pytest.mark.asyncio
-async def test_monero_get_payment_status_confirmed_returns_fee():
-    respx.post(RPC_URL).mock(return_value=Response(200, json={
-        "jsonrpc": "2.0", "id": "0",
-        "result": {"transfer": {
-            "txid": "tx123", "type": "out",
-            "confirmations": 1, "fee": 123_000_000,
-        }}
-    }))
-    backend = MoneroBackend(unit=Unit.pxmr, rpc_url=RPC_URL)
-    backend.pending_payments["tx123"] = {
-        "tx_hash": "tx123",
-        "tx_metadata": "signed-transaction",
-        "amount": 1_000_000_000_000,
-        "fee": 100_000_000,
-        "relayed": True,
-    }
-
-    status = await backend.get_payment_status("tx123")
+    status = await backend.get_payment_status("test")
 
     assert status.settled
     assert status.preimage == "tx123"
     assert status.fee == Amount(Unit.pxmr, 123_000_000)
-    assert "tx123" not in backend.pending_payments
+    methods = [json.loads(call.request.content)["method"] for call in route.calls]
+    assert methods == ["get_transfer_by_txid"]
+    assert "tx_metadata" not in backend.pending_payments["test"]
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_monero_get_payment_status_rejected_relay_stays_pending():
+    respx.post(RPC_URL).mock(side_effect=[
+        Response(200, json={
+            "jsonrpc": "2.0", "id": "0",
+            "error": {"code": -8, "message": "Transaction not found."},
+        }),
+        Response(200, json={
+            "jsonrpc": "2.0", "id": "0",
+            "error": {"code": -4, "message": "Transaction was rejected by daemon"},
+        }),
+    ])
+    backend = MoneroBackend(unit=Unit.pxmr, rpc_url=RPC_URL)
+    backend.pending_payments["test"] = {
+        "tx_hash": "tx123",
+        "tx_metadata": "signed-transaction",
+        "amount": 1_000_000_000_000,
+        "fee": 100_000_000,
+    }
+
+    status = await backend.get_payment_status("test")
+
+    assert status.pending
+    assert backend.pending_payments["test"]["tx_metadata"] == "signed-transaction"
 
 
 @respx.mock
@@ -544,18 +532,56 @@ async def test_monero_get_payment_status_failed_transfer():
         }}
     }))
     backend = MoneroBackend(unit=Unit.pxmr, rpc_url=RPC_URL)
-    backend.pending_payments["tx123"] = {
+    backend.pending_payments["test"] = {
         "tx_hash": "tx123",
-        "tx_metadata": "signed-transaction",
         "amount": 1_000_000_000_000,
         "fee": 100_000_000,
-        "relayed": True,
     }
 
-    status = await backend.get_payment_status("tx123")
+    status = await backend.get_payment_status("test")
 
     assert status.failed
-    assert "tx123" not in backend.pending_payments
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_monero_get_payment_status_unknown_quote():
+    respx.post(RPC_URL).mock(return_value=Response(200, json={
+        "jsonrpc": "2.0", "id": "0",
+        "error": {"code": -8, "message": "Transaction not found."},
+    }))
+    status = await monero.get_payment_status("never-sent")
+    assert status.unknown
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_monero_payment_survives_restart(tmp_path):
+    state_file = str(tmp_path / "monero-state.json")
+    respx.post(RPC_URL).mock(side_effect=[
+        Response(200, json={"jsonrpc": "2.0", "id": "0", "result": {"valid": True}}),
+        Response(200, json={
+            "jsonrpc": "2.0", "id": "0",
+            "result": {"tx_hash": "tx123", "tx_metadata": "signed", "fee": 100_000_000},
+        }),
+        httpx.ReadTimeout("relay response lost"),
+        Response(200, json={
+            "jsonrpc": "2.0", "id": "0",
+            "result": {"transfer": {"txid": "tx123", "type": "pending", "fee": 100_000_000}},
+        }),
+    ])
+    quote = MeltQuote(
+        request=f"monero:{VALID_ADDRESS}",
+        quote="test_quote", method="monero", checking_id="test",
+        unit="pxmr", amount=1_000_000_000_000, fee_reserve=200_000_000,
+        state=MeltQuoteState.unpaid,
+    )
+    payment = await MoneroBackend(rpc_url=RPC_URL, state_file=state_file).pay_invoice(quote, 0)
+    assert payment.pending
+
+    status = await MoneroBackend(rpc_url=RPC_URL, state_file=state_file).get_payment_status("test")
+    assert status.settled
+    assert status.preimage == "tx123"
 
 
 def test_monero_state_file_is_backward_compatible_and_persists_payments(tmp_path):
@@ -569,12 +595,11 @@ def test_monero_state_file_is_backward_compatible_and_persists_payments(tmp_path
     assert backend.pending_deposits == legacy_deposits
     assert backend.pending_payments == {}
 
-    backend.pending_payments["tx123"] = {
+    backend.pending_payments["test"] = {
         "tx_hash": "tx123",
         "tx_metadata": "signed-transaction",
         "amount": 1,
         "fee": 1,
-        "relayed": False,
     }
     assert backend._save_state()
 
