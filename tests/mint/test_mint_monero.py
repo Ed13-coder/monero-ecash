@@ -8,7 +8,7 @@ import pytest
 import respx
 from httpx import Response
 
-from cashu.core.base import Amount, MeltQuote, MeltQuoteState, Unit
+from cashu.core.base import Amount, MeltQuote, MeltQuoteState, Method, Proof, Unit
 from cashu.core.models import PostMeltQuoteRequest
 from cashu.lightning.monero import MoneroBackend, MoneroRPCError
 
@@ -631,6 +631,69 @@ async def test_monero_payment_survives_restart(tmp_path):
     status = await MoneroBackend(rpc_url=RPC_URL, state_file=state_file).get_payment_status("test")
     assert status.settled
     assert status.preimage == "tx123"
+
+
+async def create_pending_monero_melt(ledger):
+    keyset = await ledger.activate_keyset(derivation_path="m/0'/6'/0'")
+    quote = MeltQuote(
+        quote="monero_quote", method="monero", request=f"monero:{VALID_ADDRESS}",
+        checking_id="test", unit="pxmr", state=MeltQuoteState.pending,
+        amount=1_000_000_000, fee_reserve=200_000_000,
+    )
+    await ledger.crud.store_melt_quote(quote=quote, db=ledger.db)
+    proof = Proof(amount=1_200_000_000, C="asdasd", secret="asdasd", id=keyset.id)
+    await ledger.crud.set_proof_pending(db=ledger.db, proof=proof, quote_id=quote.quote)
+    return proof
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_monero_startup_settles_saved_withdrawal(ledger):
+    respx.post(RPC_URL).mock(return_value=Response(200, json={
+        "jsonrpc": "2.0", "id": "0",
+        "result": {"transfer": {"txid": "tx123", "type": "pending", "fee": 100_000_000}},
+    }))
+    backend = MoneroBackend(unit=Unit.pxmr, rpc_url=RPC_URL)
+    backend.pending_payments["test"] = {
+        "tx_hash": "tx123",
+        "tx_metadata": "signed",
+        "amount": 1_000_000_000_000,
+        "fee": 100_000_000,
+    }
+    ledger.backends[Method.monero] = {Unit.pxmr: backend}
+    proof = await create_pending_monero_melt(ledger)
+
+    await ledger._check_pending_proofs_and_melt_quotes()
+
+    quote = await ledger.crud.get_melt_quote(quote_id="monero_quote", db=ledger.db)
+    assert quote.state == MeltQuoteState.paid
+    assert quote.payment_preimage == "tx123"
+    states = await ledger.db_read.get_proofs_states([proof.Y])
+    assert states[0].spent
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_monero_startup_keeps_failed_withdrawal_pending(ledger):
+    respx.post(RPC_URL).mock(return_value=Response(200, json={
+        "jsonrpc": "2.0", "id": "0",
+        "result": {"transfer": {"txid": "tx123", "type": "failed"}},
+    }))
+    backend = MoneroBackend(unit=Unit.pxmr, rpc_url=RPC_URL)
+    backend.pending_payments["test"] = {
+        "tx_hash": "tx123",
+        "amount": 1_000_000_000_000,
+        "fee": 100_000_000,
+    }
+    ledger.backends[Method.monero] = {Unit.pxmr: backend}
+    proof = await create_pending_monero_melt(ledger)
+
+    await ledger._check_pending_proofs_and_melt_quotes()
+
+    quote = await ledger.crud.get_melt_quote(quote_id="monero_quote", db=ledger.db)
+    assert quote.state == MeltQuoteState.pending
+    states = await ledger.db_read.get_proofs_states([proof.Y])
+    assert states[0].pending
 
 
 def test_monero_state_file_is_backward_compatible_and_persists_payments(tmp_path):
