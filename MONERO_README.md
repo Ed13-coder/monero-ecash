@@ -14,6 +14,8 @@ This project is being developed for [Monero Bounty #136](https://bounties.monero
 - `tests/mint/test_mint_monero.py` - Unit tests for Monero backend
 - `tests/mint/test_monero_integration.py` - Integration tests (requires wallet RPC)
 - `scripts/test_e2e_monero.py` - End-to-end test script
+- `scripts/monero_regtest.py` - Full cycle against real monerod and wallet-rpc on regtest
+- `MONERO_E2E.md` - A recorded regtest run
 
 ### Modified Files
 - `cashu/core/base.py` - Added `Unit.xmr`, `Unit.pxmr` (piconero), and `Method.monero`
@@ -34,6 +36,9 @@ MINT_BACKEND_MONERO_XMR=MoneroBackend
 MINT_MONERO_RPC_URL=http://127.0.0.1:18082/json_rpc
 MINT_MONERO_RPC_USERNAME=  # Optional
 MINT_MONERO_RPC_PASSWORD=  # Optional
+
+# 6 in the derivation path is pxmr, needed to issue Monero ecash at all
+MINT_DERIVATION_PATH_LIST=["m/0'/6'/0'"]
 
 # Confirmations before a deposit is credited
 MINT_MONERO_MIN_CONFIRMATIONS=10
@@ -199,6 +204,31 @@ monero-wallet-rpc --rpc-bind-port 18082 --wallet-file /path/to/wallet --password
 RUN_MONERO_INTEGRATION=true pytest tests/mint/test_monero_integration.py -v
 ```
 
+### Regtest
+
+`scripts/monero_regtest.py` runs the whole cycle against a private regtest chain
+with nothing mocked. It starts monerod, a wallet-rpc for the mint and one for the
+users, and the mint itself, then pays a mint quote from a separate payer wallet,
+checks the quote stays unpaid until the tenth confirmation, mints, sends the
+ecash to a second wallet, melts it and checks the XMR lands in a destination
+wallet the mint has no key for.
+
+```bash
+python scripts/monero_regtest.py --fetch ~/monero
+python scripts/monero_regtest.py --bin-dir ~/monero/monero-x86_64-linux-gnu-v0.18.5.3 \
+  --locked-bin-dir ~/monero/monero-x86_64-linux-gnu-v0.18.3.3
+```
+
+`--fetch` downloads v0.18.5.3 and v0.18.3.3 from downloads.getmonero.org and
+refuses to unpack them unless the sha256 matches the value pinned in the script,
+which was taken from the GPG-signed hashes.txt of each release. The older release
+is only needed for the time-locked deposit check: since v0.18.3.4 neither the
+wallet nor the daemon will create or relay a transaction with an `unlock_time`,
+so the script briefly runs the chain on v0.18.3.3 to mine one.
+
+CI runs the same script on pull requests and on main. A recorded run is in
+[MONERO_E2E.md](MONERO_E2E.md).
+
 ### End-to-End Test
 Run the full end-to-end test:
 ```bash
@@ -226,6 +256,7 @@ python scripts/test_e2e_monero.py
 - [x] Unit tests for Monero backend
 - [x] Integration test suite (tests/mint/test_monero_integration.py)
 - [x] End-to-end test script (scripts/test_e2e_monero.py)
+- [x] Regtest run against real monerod (scripts/monero_regtest.py)
 - [ ] Testing with real Monero wallet RPC (testnet/stagenet)
 
 ## License
