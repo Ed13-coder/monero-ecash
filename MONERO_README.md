@@ -43,6 +43,10 @@ MINT_MAX_MINT_MONERO=
 MINT_MAX_MELT_MONERO=
 ```
 
+Deposit and withdrawal tracking is kept in `monero_deposits.json` in `CASHU_DIR`.
+If that file cannot be read the mint refuses to start, since starting empty
+would forget withdrawals that may already be on chain.
+
 ## Requirements
 
 1. Running Monero wallet RPC:
@@ -78,21 +82,43 @@ Anything shallower is ignored, including transactions still in the txpool.
 Crediting early would let someone mint against a transaction that never lands and
 then replace it, which is the same mistake as treating a 0-conf payment as final.
 
+A deposit also has to be reported unlocked by the wallet RPC, because a
+transaction can carry an `unlock_time` that keeps its outputs unspendable long
+after it is mined. Nodes no longer relay such transactions, but a miner can still
+put one in a block. The wallet RPC treats every output as locked for its first
+ten blocks anyway, so a confirmation count below 10 does not credit anything
+sooner.
+
 ### Withdrawals
 
-Withdrawals are marked settled when the transaction is broadcast, not when it is
-mined. `get_payment_status` returns SETTLED for any txid in `pending_payments`,
-which `pay_invoice` writes as soon as the transfer goes out.
+`transfer` is not idempotent. If the response is lost after the wallet RPC has
+sent the transaction, retrying the call pays the address a second time. Withdrawals
+are therefore built with `do_not_relay`, saved to the state file together with
+the signed transaction, and only then broadcast with `relay_tx`. The build is
+never retried, and the relay is only repeated by the status check below.
 
-That is a tradeoff rather than an oversight:
+A withdrawal counts as paid once the daemon has accepted the transaction, not
+once it is mined. Waiting for a confirmation would add a couple of minutes to
+every melt. It would also cost users their fee change, because the Cashu wallet
+does not collect change for a melt that settles after the request returns. The
+remaining risk only runs one way: a transaction that was accepted and then never
+confirms means the user burned tokens without getting their XMR. It cannot drain
+the mint.
 
-- Waiting for confirmations would add roughly 20 minutes to every withdrawal
-- The risk only runs one way. A dropped transaction means the user burned tokens
-  and did not get their XMR. It cannot be used to drain the mint
-- Monero has no fee bumping, so a stuck withdrawal needs manual handling anyway
+If `relay_tx` fails or times out, the melt stays pending. The next status check
+asks the wallet RPC about the transaction first and relays the saved copy only if
+it has never seen it, because relaying a transaction that is already mined makes
+the wallet RPC treat its spent inputs as unspent.
 
-To prefer correctness over speed, gate `get_payment_status` on confirmations the
-same way `get_invoice_status` does.
+A withdrawal the wallet RPC reports as failed is never rolled back on its own.
+It marks a transaction failed when its daemon has not had it in the pool for a
+while, and clears that if it reappears, so the transaction can still be mined.
+The melt stays pending until the operator has checked the chain and set the
+quote with `mint-cli update melt-quote`.
+
+The fee of the built transaction is compared with the reserve quoted to the user
+before anything is relayed. If it is higher the transaction is dropped and the
+melt fails without spending anything.
 
 ## API Endpoints
 
@@ -135,7 +161,7 @@ cashu monero withdraw 0.1 <address> --force
 The Monero backend includes comprehensive error handling:
 
 ### Connection Errors
-- Automatic retry with exponential backoff (3 attempts)
+- Retry with backoff (3 attempts), except `transfer` and `relay_tx`, which are sent once
 - Clear error messages for connection failures
 - Timeout handling for slow RPC responses
 
