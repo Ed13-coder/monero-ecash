@@ -1,0 +1,38 @@
+name: monero-regtest
+
+on:
+  workflow_call:
+    inputs:
+      python-version:
+        default: "3.10"
+        type: string
+      poetry-version:
+        default: "1.8.5"
+        type: string
+
+jobs:
+  monero-regtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/prepare
+        with:
+          python-version: ${{ inputs.python-version }}
+          poetry-version: ${{ inputs.poetry-version }}
+      - uses: actions/cache@v4
+        with:
+          path: ~/monero
+          key: monero-v0.18.5.3-v0.18.3.3
+      - name: Fetch Monero
+        run: poetry run python scripts/monero_regtest.py --fetch ~/monero
+      - name: Run Monero regtest
+        run: |
+          poetry run python scripts/monero_regtest.py \
+            --bin-dir ~/monero/monero-x86_64-linux-gnu-v0.18.5.3 \
+            --locked-bin-dir ~/monero/monero-x86_64-linux-gnu-v0.18.3.3 \
+            --json monero-regtest.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: monero-regtest
+          path: monero-regtest.json

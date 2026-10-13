@@ -57,6 +57,9 @@ jobs:
       poetry-version: ${{ matrix.poetry-version }}
       mint-database: ${{ matrix.mint-database }}
 
+  monero-regtest:
+    uses: ./.github/workflows/monero-regtest.yml
+
   # The regtest suites drive the Lightning backends through an external harness
   # (callebtc/cashu-regtest-enviroment) that is cloned unpinned at run time. This
   # fork's workflows are older than upstream's, so the current harness no longer
