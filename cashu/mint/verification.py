@@ -237,6 +237,18 @@ class LedgerVerification(
             raise TransactionUnitMismatchError()
         return units_proofs[0]
 
+    def _verify_proofs_unit(self, proofs: List[Proof], expected_unit: Unit) -> None:
+        """Verifies that all proofs have the expected unit and valid keysets."""
+        if not proofs:
+            raise TransactionError("no proofs provided.")
+        for p in proofs:
+            if p.id not in self.keysets:
+                raise TransactionError(f"keyset {p.id} unknown")
+            if self.keysets[p.id].unit != expected_unit:
+                raise TransactionError(
+                    f"proof unit {self.keysets[p.id].unit.name} does not match quote unit {expected_unit.name}"
+                )
+
     def get_fees_for_proofs(self, proofs: List[Proof]) -> int:
         if not len({self.keysets[p.id].unit for p in proofs}) == 1:
             raise TransactionUnitError("inputs have different units.")

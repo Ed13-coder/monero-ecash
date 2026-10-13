@@ -8,6 +8,7 @@ from cashu.core.errors import (
     LightningPaymentFailedError,
     OutputsAlreadySignedError,
     OutputsArePendingError,
+    TransactionError,
 )
 from cashu.core.models import PostMeltQuoteRequest, PostMintQuoteRequest
 from cashu.core.settings import settings
@@ -518,6 +519,16 @@ async def test_mint_melt_different_units(ledger: Ledger, wallet: Wallet):
     mint_quote = await wallet.request_mint(64)
     await wallet.mint(64, quote_id=mint_quote.quote)
 
+    wallet_usd = await Wallet.with_db(
+        url=wallet.url,
+        db="test_data/wallet_usd",
+        name="wallet_usd",
+        unit="usd",
+    )
+    await wallet_usd.load_mint()
+    mint_quote_usd = await wallet_usd.request_mint(64)
+    await wallet_usd.mint(64, quote_id=mint_quote_usd.quote)
+
     amount = 32
 
     # mint quote in sat
@@ -534,7 +545,7 @@ async def test_mint_melt_different_units(ledger: Ledger, wallet: Wallet):
     assert usd_melt_quote.paid is False
 
     # pay melt quote with usd
-    await ledger.melt(proofs=wallet.proofs, quote=usd_melt_quote.quote)
+    await ledger.melt(proofs=wallet_usd.proofs, quote=usd_melt_quote.quote)
 
     output_amounts = [32]
 
@@ -545,6 +556,33 @@ async def test_mint_melt_different_units(ledger: Ledger, wallet: Wallet):
     mint_resp = await ledger.mint(outputs=outputs, quote_id=sat_mint_quote.quote)
 
     assert len(mint_resp) == len(outputs)
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(is_regtest, reason="only fake wallet")
+async def test_melt_with_wrong_unit_proofs(ledger: Ledger, wallet: Wallet):
+    """A melt quote cannot be paid with proofs of a different unit."""
+    wallet_usd = await Wallet.with_db(
+        url=wallet.url,
+        db="test_data/wallet_usd_different_unit",
+        name="wallet_usd_different_unit",
+        unit="usd",
+    )
+    await wallet_usd.load_mint()
+    mint_quote_usd = await wallet_usd.request_mint(100)
+    usd_proofs = await wallet_usd.mint(100, quote_id=mint_quote_usd.quote)
+
+    sat_mint_quote = await ledger.mint_quote(
+        quote_request=PostMintQuoteRequest(amount=100, unit="sat")
+    )
+    sat_melt_quote = await ledger.melt_quote(
+        PostMeltQuoteRequest(unit="sat", request=sat_mint_quote.request)
+    )
+
+    with pytest.raises(
+        TransactionError, match="proof unit usd does not match quote unit sat"
+    ):
+        await ledger.melt(proofs=usd_proofs, quote=sat_melt_quote.quote)
 
 
 # Tests for unique pending melt quote checking_id constraint

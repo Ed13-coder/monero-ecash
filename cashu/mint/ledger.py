@@ -937,6 +937,9 @@ class Ledger(
             melt_quote.unit, melt_quote.method
         )
 
+        # make sure that the proofs are in the same unit as the quote
+        self._verify_proofs_unit(proofs, expected_unit=unit)
+
         # make sure that the outputs (for fee return) are in the same unit as the quote
         if outputs:
             # _verify_outputs checks if all outputs have the same unit
