@@ -439,6 +439,27 @@ async def test_monero_get_invoice_status_locked(lock_fields):
 
 @respx.mock
 @pytest.mark.asyncio
+async def test_monero_get_invoice_status_paid_in_parts():
+    respx.post(RPC_URL).mock(return_value=Response(200, json={
+        "jsonrpc": "2.0", "id": "0",
+        "result": {"address": VALID_SUBADDRESS, "address_index": 1}
+    }))
+    invoice = await monero.create_invoice(Amount(Unit.pxmr, 1_000_000_000_000))
+
+    respx.post(RPC_URL).mock(return_value=Response(200, json={
+        "jsonrpc": "2.0", "id": "0",
+        "result": {"in": [
+            {"amount": 600_000_000_000, "txid": "first", "confirmations": 12, "locked": False},
+            {"amount": 400_000_000_000, "txid": "second", "confirmations": 10, "locked": False},
+        ]}
+    }))
+    status = await monero.get_invoice_status(invoice.checking_id)
+    assert status.settled
+    assert status.preimage == "second"
+
+
+@respx.mock
+@pytest.mark.asyncio
 async def test_monero_get_invoice_status_pool_not_credited():
     # A tx still in the txpool (0-conf) must not settle the deposit.
     respx.post(RPC_URL).mock(return_value=Response(200, json={

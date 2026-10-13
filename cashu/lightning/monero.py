@@ -377,6 +377,9 @@ class MoneroBackend(LightningBackend):
                 "subaddr_indices": [deposit["address_index"]],
             })
 
+            # Each subaddress is handed out for one quote, so all its transfers
+            # add up to that deposit.
+            received = 0
             for tx in result.get("in", []):
                 # A confirmed output can still be locked by the transaction's
                 # unlock_time. Do not issue liquid ecash until the wallet says
@@ -386,7 +389,8 @@ class MoneroBackend(LightningBackend):
                     continue
                 if tx.get("confirmations", 0) < self.min_confirmations:
                     continue
-                if tx.get("amount", 0) >= deposit["amount"]:
+                received += tx.get("amount", 0)
+                if received >= deposit["amount"]:
                     deposit["paid"] = True
                     deposit["tx_hash"] = tx.get("txid")
                     self._save_state()
