@@ -418,7 +418,13 @@ class MoneroBackend(LightningBackend):
 
         transfer = result.get("transfer", {})
         if transfer.get("type") == "failed":
-            return PaymentStatus(result=PaymentResult.FAILED)
+            # wallet2 calls a tx failed when its own daemon has not had it in the
+            # pool for a while, and flips it back if it shows up again. It can
+            # still be mined, so rolling the melt back could pay out twice.
+            return PaymentStatus(
+                result=PaymentResult.PENDING,
+                error_message=f"Wallet reports withdrawal {txid} as failed",
+            )
         if payment and payment.pop("tx_metadata", None):
             self._save_state()
         return PaymentStatus(

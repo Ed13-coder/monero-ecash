@@ -524,7 +524,7 @@ async def test_monero_get_payment_status_rejected_relay_stays_pending():
 
 @respx.mock
 @pytest.mark.asyncio
-async def test_monero_get_payment_status_failed_transfer():
+async def test_monero_get_payment_status_failed_transfer_stays_pending():
     respx.post(RPC_URL).mock(return_value=Response(200, json={
         "jsonrpc": "2.0", "id": "0",
         "result": {"transfer": {
@@ -540,7 +540,9 @@ async def test_monero_get_payment_status_failed_transfer():
 
     status = await backend.get_payment_status("test")
 
-    assert status.failed
+    assert status.pending
+    assert not status.failed
+    assert "test" in backend.pending_payments
 
 
 @respx.mock
