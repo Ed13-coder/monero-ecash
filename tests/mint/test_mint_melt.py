@@ -3,11 +3,12 @@ from typing import List, Tuple
 import pytest
 import pytest_asyncio
 
-from cashu.core.base import MeltQuote, MeltQuoteState, Proof
+from cashu.core.base import MeltQuote, MeltQuoteState, MintQuoteState, Proof
 from cashu.core.errors import (
     LightningPaymentFailedError,
     OutputsAlreadySignedError,
     OutputsArePendingError,
+    TransactionError,
 )
 from cashu.core.models import PostMeltQuoteRequest, PostMintQuoteRequest
 from cashu.core.settings import settings
@@ -545,6 +546,38 @@ async def test_mint_melt_different_units(ledger: Ledger, wallet: Wallet):
     mint_resp = await ledger.mint(outputs=outputs, quote_id=sat_mint_quote.quote)
 
     assert len(mint_resp) == len(outputs)
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(is_regtest, reason="only fake wallet")
+async def test_internal_melt_failure_unsets_pending(ledger: Ledger, wallet: Wallet):
+    """A failed internal settlement leaves neither the proofs nor the quote pending."""
+    mint_quote = await wallet.request_mint(64)
+    proofs = await wallet.mint(64, quote_id=mint_quote.quote)
+
+    sat_mint_quote = await ledger.mint_quote(
+        quote_request=PostMintQuoteRequest(amount=64, unit="sat")
+    )
+    sat_melt_quote = await ledger.melt_quote(
+        PostMeltQuoteRequest(unit="sat", request=sat_mint_quote.request)
+    )
+    stored = await ledger.crud.get_mint_quote(
+        quote_id=sat_mint_quote.quote, db=ledger.db
+    )
+    assert stored
+    stored.state = MintQuoteState.paid
+    await ledger.crud.update_mint_quote(quote=stored, db=ledger.db)
+
+    with pytest.raises(TransactionError, match="mint quote already paid"):
+        await ledger.melt(proofs=proofs, quote=sat_melt_quote.quote)
+
+    states = await ledger.db_read.get_proofs_states([p.Y for p in proofs])
+    assert not any(s.pending for s in states)
+    melt_quote = await ledger.crud.get_melt_quote(
+        quote_id=sat_melt_quote.quote, db=ledger.db
+    )
+    assert melt_quote
+    assert melt_quote.state == MeltQuoteState.unpaid
 
 
 # Tests for unique pending melt quote checking_id constraint

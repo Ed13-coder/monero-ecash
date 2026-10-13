@@ -983,7 +983,17 @@ class Ledger(
             await self._store_blinded_messages(outputs, melt_id=melt_quote.quote)
 
         # if the melt corresponds to an internal mint, mark both as paid
-        melt_quote = await self.melt_mint_settle_internally(melt_quote, proofs)
+        try:
+            melt_quote = await self.melt_mint_settle_internally(melt_quote, proofs)
+        except Exception:
+            await self.db_write._unset_proofs_pending(proofs, keysets=self.keysets)
+            await self.db_write._unset_melt_quote_pending(
+                quote=melt_quote, state=previous_state
+            )
+            await self.crud.delete_blinded_messages_melt_id(
+                melt_id=melt_quote.quote, db=self.db
+            )
+            raise
         # quote not paid yet (not internal), pay it with the backend
         if not melt_quote.paid:
             logger.debug(f"Lightning: pay invoice {melt_quote.request}")
