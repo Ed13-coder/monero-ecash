@@ -864,10 +864,10 @@ class Ledger(
 
         # verify amounts from bolt11 invoice
         bolt11_request = melt_quote.request
-        invoice_obj = bolt11.decode(bolt11_request)
-
-        if not invoice_obj.amount_msat:
-            raise TransactionError("invoice has no amount.")
+        if melt_quote.method == Method.bolt11.name:
+            invoice_obj = bolt11.decode(bolt11_request)
+            if not invoice_obj.amount_msat:
+                raise TransactionError("invoice has no amount.")
         if not mint_quote.amount == melt_quote.amount:
             raise TransactionError("amounts do not match")
         if not bolt11_request == mint_quote.request:

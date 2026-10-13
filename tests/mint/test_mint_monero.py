@@ -4,7 +4,14 @@ import pytest
 import respx
 from httpx import Response
 
-from cashu.core.base import Amount, MeltQuote, MeltQuoteState, Unit
+from cashu.core.base import (
+    Amount,
+    MeltQuote,
+    MeltQuoteState,
+    MintQuote,
+    MintQuoteState,
+    Unit,
+)
 from cashu.core.models import PostMeltQuoteRequest
 from cashu.lightning.monero import MoneroBackend, MoneroRPCError
 
@@ -262,6 +269,30 @@ async def test_monero_auth_error():
     with pytest.raises(MoneroRPCError) as exc:
         await monero._rpc_call("get_balance", {}, retries=1)
     assert exc.value.code == 401
+
+
+@pytest.mark.asyncio
+async def test_monero_internal_melt_settles(ledger):
+    request = f"monero:{VALID_SUBADDRESS}?tx_amount=1.000000000000"
+    mint_quote = MintQuote(
+        quote="monero_mint_quote", method="monero", request=request,
+        checking_id="deposit", unit="pxmr", amount=1_000_000_000_000,
+        state=MintQuoteState.unpaid,
+    )
+    await ledger.crud.store_mint_quote(quote=mint_quote, db=ledger.db)
+    melt_quote = MeltQuote(
+        quote="monero_melt_quote", method="monero", request=request,
+        checking_id="withdrawal", unit="pxmr", amount=1_000_000_000_000,
+        fee_reserve=0, state=MeltQuoteState.pending,
+    )
+    await ledger.crud.store_melt_quote(quote=melt_quote, db=ledger.db)
+
+    settled = await ledger.melt_mint_settle_internally(melt_quote, [])
+
+    assert settled.state == MeltQuoteState.paid
+    stored = await ledger.crud.get_mint_quote(quote_id="monero_mint_quote", db=ledger.db)
+    assert stored
+    assert stored.state == MintQuoteState.paid
 
 
 class TestUnitConversion:
