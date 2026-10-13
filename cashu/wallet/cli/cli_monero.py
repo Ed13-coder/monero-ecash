@@ -134,7 +134,9 @@ async def withdraw(ctx: Context, amount: float, address: str, force: bool):
             return
 
         total_needed = quote.amount + quote.fee_reserve
-        proofs = await wallet.select_to_send(wallet.proofs, total_needed)
+        proofs, _ = await wallet.select_to_send(
+            wallet.proofs, total_needed, include_fees=True
+        )
         result = await wallet.melt(proofs, monero_uri, quote.fee_reserve, quote.quote, method=Method.monero)
 
         if result.payment_preimage:
