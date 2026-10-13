@@ -73,6 +73,9 @@ if settings.mint_backend_bolt11_eur:
     backends.setdefault(Method.bolt11, {})[Unit.eur] = backend_bolt11_eur
 monero_backend_name = getattr(settings, 'mint_backend_monero_xmr', None)
 if monero_backend_name:
+    # Nothing else on the mint side creates cashu_dir, and without it the
+    # deposit and withdrawal state never reaches disk.
+    os.makedirs(settings.cashu_dir, exist_ok=True)
     backend_monero_xmr = getattr(wallets_module, monero_backend_name)(
         unit=Unit.pxmr,
         rpc_url=settings.mint_monero_rpc_url,

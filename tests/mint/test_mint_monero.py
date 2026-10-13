@@ -114,6 +114,20 @@ async def test_monero_create_invoice_failure():
 
 @respx.mock
 @pytest.mark.asyncio
+async def test_monero_create_invoice_not_saved(monkeypatch):
+    respx.post(RPC_URL).mock(return_value=Response(200, json={
+        "jsonrpc": "2.0", "id": "0",
+        "result": {"address": VALID_SUBADDRESS, "address_index": 1}
+    }))
+    backend = MoneroBackend(unit=Unit.pxmr, rpc_url=RPC_URL)
+    monkeypatch.setattr(backend, "_save_state", lambda: False)
+    invoice = await backend.create_invoice(Amount(Unit.pxmr, 1_000_000_000_000))
+    assert not invoice.ok
+    assert backend.pending_deposits == {}
+
+
+@respx.mock
+@pytest.mark.asyncio
 async def test_monero_pay_invoice():
     route = respx.post(RPC_URL).mock(side_effect=[
         Response(200, json={"jsonrpc": "2.0", "id": "0", "result": {"valid": True}}),
@@ -641,6 +655,14 @@ def test_monero_state_file_is_backward_compatible_and_persists_payments(tmp_path
     restored = MoneroBackend(state_file=str(state_file))
     assert restored.pending_deposits == legacy_deposits
     assert restored.pending_payments == backend.pending_payments
+
+
+def test_monero_unreadable_state_file_refuses_to_start(tmp_path):
+    state_file = tmp_path / "monero-state.json"
+    state_file.write_text('{"pending_payments": {"test": ')
+    with pytest.raises(ValueError):
+        MoneroBackend(state_file=str(state_file))
+    assert state_file.read_text() == '{"pending_payments": {"test": '
 
 
 @respx.mock

@@ -90,8 +90,10 @@ class MoneroBackend(LightningBackend):
                 # pending-deposit mapping itself. Keep those files readable.
                 return state, {}
         except (OSError, ValueError):
+            # Starting empty would let the next save overwrite the only record
+            # of withdrawals that may already be on chain.
             logger.error(f"Could not read Monero state from {self.state_file}")
-            return {}, {}
+            raise
 
     def _save_state(self) -> bool:
         """Persist payment state via an atomic replace."""
@@ -107,6 +109,8 @@ class MoneroBackend(LightningBackend):
                     },
                     f,
                 )
+                f.flush()
+                os.fsync(f.fileno())
             os.replace(tmp, self.state_file)
             return True
         except OSError as e:
@@ -244,7 +248,9 @@ class MoneroBackend(LightningBackend):
                 "amount": amount.amount,
                 "paid": False
             }
-            self._save_state()
+            if not self._save_state():
+                self.pending_deposits.pop(checking_id)
+                return InvoiceResponse(ok=False, error_message="Could not persist deposit state")
 
             amount_xmr = Decimal(amount.amount) / Decimal(10**12)
             payment_request = f"monero:{address}?tx_amount={amount_xmr:.12f}"
